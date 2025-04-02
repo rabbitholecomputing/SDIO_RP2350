@@ -17,7 +17,7 @@
 
 // Block size shouldn't be changed, but request queue size can be adjusted.
 // #define SDIO_BLOCK_SIZE 512
-// #define SDIO_MAX_BLOCKS_PER_REQ 256
+// #define SDIO_MAX_BLOCKS_PER_REQ 128
 
 // PIO block to use
 #define SDIO_PIO pio1

@@ -109,9 +109,13 @@ static bool read_single_sector(SdioCard *card, uint32_t sector, uint8_t *dst)
 
     if (reply & 0xFFF80000)
     {
-        SDIO_ERRMSG("read_single_sector error", sector, reply);
-        rp2350_sdio_stop();
-        return false;
+        // It is normal for the last sector to return OUT_OF_RANGE
+        if (sector != g_sdio_sector_count - 1)
+        {
+            SDIO_ERRMSG("read_single_sector error", sector, reply);
+            rp2350_sdio_stop();
+            return false;
+        }
     }
 
     do {
@@ -222,8 +226,13 @@ bool SdioCard::begin(SdioConfig sdioConfig)
     uint32_t reply;
     sdio_status_t status;
     
+    m_curState = IDLE_STATE;
+
     // Initialize at 400 kHz clock speed
     rp2350_sdio_init(rp2350_sdio_get_timing(SDIO_INITIALIZE));
+
+    // Wait for initial clock cycles
+    SDIO_WAIT_US(1000);
 
     // Establish initial connection with the card
     for (int retries = 0; retries < 5; retries++)
@@ -366,6 +375,11 @@ uint32_t SdioCard::errorLine() const
 
 bool SdioCard::isBusy() 
 {
+    if (m_curState != IDLE_STATE)
+    {
+        stopTransmission(false);
+    }
+
     return gpio_get(SDIO_D0) == 0;
 }
 
@@ -388,7 +402,28 @@ bool SdioCard::readCSD(csd_t* csd)
 
 bool SdioCard::readSDS(sds_t* sds)
 {
-    memset(sds, 0, sizeof(*sds));
+    if (m_curState != IDLE_STATE)
+    {
+        stopTransmission(false);
+    }
+
+    uint32_t reply;
+    if (!checkReturnOk(rp2350_sdio_command_u32(CMD55, g_sdio_rca, &reply, 0)) ||
+        !checkReturnOk(rp2350_sdio_command_u32(ACMD13, 0, &reply, SDIO_FLAG_STOP_CLK)))
+    {
+        rp2350_sdio_stop();
+        return false;
+    }
+
+    rp2350_sdio_rx_start((uint8_t*)g_sdio_tmp_buf, 1, 64);
+
+    do {
+        g_sdio_error = rp2350_sdio_rx_poll(NULL);
+    } while (g_sdio_error == SDIO_BUSY);
+
+    rp2350_sdio_stop();
+
+    memcpy(sds, g_sdio_tmp_buf, sizeof(*sds));
     return true;
 }
 
@@ -406,13 +441,17 @@ bool SdioCard::readStart(uint32_t sector)
         return true;
     }
 
+    if (m_curState != IDLE_STATE)
+    {
+        stopTransmission(true);
+    }
+
     // Cards up to 2GB use byte addressing, SDHC cards use sector addressing
     uint32_t address = (type() == SD_CARD_TYPE_SDHC) ? sector : (sector * 512);
 
     // Send the read command and then stop clock before first block
     uint32_t reply;
-    if (!checkReturnOk(rp2350_sdio_command_u32(16, 512, &reply, 0)) || // SET_BLOCKLEN
-        !checkReturnOk(rp2350_sdio_command_u32(CMD18, address, &reply, SDIO_FLAG_STOP_CLK))) // READ_MULTIPLE_BLOCK
+    if (!checkReturnOk(rp2350_sdio_command_u32(CMD18, address, &reply, SDIO_FLAG_STOP_CLK))) // READ_MULTIPLE_BLOCK
     {
         stopTransmission(false);
         return false;
@@ -421,15 +460,20 @@ bool SdioCard::readStart(uint32_t sector)
     m_curState = READ_STATE;
     m_curSector = sector;
     
-    return false;
+    return true;
 }
 
 bool SdioCard::readData(uint8_t* dst)
 {
-    assert(m_curState == READ_STATE);
+    if (m_curState != READ_STATE)
+    {
+        SDIO_ERRMSG("readData() called when not in READ_STATE", (int)m_curState, dst);
+        return false;
+    }
 
     if (!checkReturnOk(rp2350_sdio_rx_start(dst, 1, SDIO_BLOCK_SIZE)))
     {
+        SDIO_ERRMSG("rp2350_sdio_rx_start failed", g_sdio_error, 0);
         return false;
     }
 
@@ -457,8 +501,7 @@ bool SdioCard::readData(uint8_t* dst)
 
 bool SdioCard::readStop()
 {
-    stopTransmission(true);
-    return false;
+    return stopTransmission(true);
 }
 
 uint32_t SdioCard::sectorCount()
@@ -468,6 +511,11 @@ uint32_t SdioCard::sectorCount()
 
 uint32_t SdioCard::status()
 {
+    if (m_curState != IDLE_STATE)
+    {
+        stopTransmission(true);
+    }
+
     uint32_t reply;
     if (checkReturnOk(rp2350_sdio_command_u32(CMD13, g_sdio_rca, &reply, 0)))
         return reply;
@@ -477,11 +525,13 @@ uint32_t SdioCard::status()
 
 bool SdioCard::stopTransmission(bool blocking)
 {
+    // It's normal to get no response to CMD12 (STOP_TRANSMISSION)
+    // if there is no transmission in progress. Running a command
+    // also forces the low level code back to CMD state machine
+    // and a continuously running clock.
     uint32_t reply;
-    rp2350_sdio_command_u32(CMD12, 0, &reply, 0);
-
+    rp2350_sdio_command_u32(CMD12, 0, &reply, SDIO_FLAG_NO_LOGMSG);
     m_curState = IDLE_STATE;
-    rp2350_sdio_stop();
     
     if (!blocking)
     {
@@ -492,13 +542,12 @@ bool SdioCard::stopTransmission(bool blocking)
         uint32_t start = SDIO_TIME_US();
         while (SDIO_ELAPSED_US(start) < SDIO_TRANSFER_TIMEOUT_US)
         {
-            if (g_sdio_error == SDIO_OK && g_sd_callback.callback)
-            {
-                g_sd_callback.callback(g_sd_callback.bytes);
-            }
+            if (isBusy()) continue;
 
-            if (!isBusy())
+            int state = (status() >> 9) & 0x0F;
+            if (state != 5)
             {
+                // Not busy and out of data state
                 return true;
             }
         }
@@ -510,7 +559,7 @@ bool SdioCard::stopTransmission(bool blocking)
 
 bool SdioCard::syncDevice()
 {
-    return true;
+    return stopTransmission(true);
 }
 
 uint8_t SdioCard::type() const
@@ -521,22 +570,75 @@ uint8_t SdioCard::type() const
         return SD_CARD_TYPE_SD2;
 }
 
-bool SdioCard::writeData(const uint8_t* src)
-{
-    SDIO_ERRMSG("SdioCard::writeData() called but not implemented!", 0, 0);
-    return false;
-}
-
 bool SdioCard::writeStart(uint32_t sector)
 {
-    SDIO_ERRMSG("SdioCard::writeStart() called but not implemented!", 0, 0);
-    return false;
+    if (m_curState == WRITE_STATE && m_curSector == sector)
+    {
+        SDIO_DBGMSG("Continuing multi-sector write", sector, 0);
+        return true;
+    }
+
+    if (m_curState != IDLE_STATE)
+    {
+        stopTransmission(true);
+    }
+
+    // Cards up to 2GB use byte addressing, SDHC cards use sector addressing
+    uint32_t address = (type() == SD_CARD_TYPE_SDHC) ? sector : (sector * 512);
+
+    // Send the read command and then stop clock before first block
+    uint32_t reply;
+    if (!checkReturnOk(rp2350_sdio_command_u32(CMD25, address, &reply, SDIO_FLAG_STOP_CLK))) // WRITE_MULTIPLE_BLOCK
+    {
+        stopTransmission(false);
+        return false;
+    }
+
+    m_curState = WRITE_STATE;
+    m_curSector = sector;
+
+    return true;
+}
+
+bool SdioCard::writeData(const uint8_t* src)
+{
+    if (m_curState != WRITE_STATE)
+    {
+        SDIO_ERRMSG("writeData() called when not in WRITE_STATE", (int)m_curState, src);
+        return false;
+    }
+
+    if (!checkReturnOk(rp2350_sdio_tx_start(src, 1, SDIO_BLOCK_SIZE)))
+    {
+        SDIO_ERRMSG("rp2350_sdio_tx_start failed", g_sdio_error, 0);
+        return false;
+    }
+
+    sd_callback_t callback = get_stream_callback(src, SDIO_BLOCK_SIZE, false, m_curSector);
+
+    do {
+        uint32_t blocks_done;
+        g_sdio_error = rp2350_sdio_tx_poll(&blocks_done);
+
+        if (callback)
+        {
+            callback(g_sd_callback.bytes_start + SDIO_BLOCK_SIZE * blocks_done);
+        }
+    } while (g_sdio_error == SDIO_BUSY);
+
+    if (g_sdio_error != SDIO_OK)
+    {
+        SDIO_ERRMSG("SdioCard::writeData failed", g_sdio_error, m_curSector);
+        return false;
+    }
+
+    m_curSector++;
+    return true;
 }
 
 bool SdioCard::writeStop()
 {
-    SDIO_ERRMSG("SdioCard::writeStop() called but not implemented!", 0, 0);
-    return false;
+    return stopTransmission(true);
 }
 
 bool SdioCard::erase(uint32_t firstSector, uint32_t lastSector)
@@ -547,6 +649,11 @@ bool SdioCard::erase(uint32_t firstSector, uint32_t lastSector)
 
 bool SdioCard::cardCMD6(uint32_t arg, uint8_t* status) {
     SDIO_DBGMSG("cardCMD6", arg, 0);
+
+    if (m_curState != IDLE_STATE)
+    {
+        stopTransmission(true);
+    }
 
     uint32_t reply;
     if (!checkReturnOk(rp2350_sdio_command_u32(CMD6, arg, &reply, SDIO_FLAG_STOP_CLK))) // SWITCH_FUNCTION
@@ -603,92 +710,82 @@ bool SdioCard::writeSector(uint32_t sector, const uint8_t* src)
 
     SDIO_DBGMSG("writeSector", sector, src);
 
-    return write_single_sector(this, sector, src);
+    if (!writeStart(sector) || !writeData(src))
+    {
+        stopTransmission(true);
 
-    // // If possible, report transfer status to application through callback.
-    // sd_callback_t callback = get_stream_callback(src, 512, false, sector);
+        // Retry with the write_single_sector code, which is more fault-tolerant
+        bool success = false;
+        for (int i = 0; i < SDIO_MAX_RETRYCOUNT; i++)
+        {
+            SDIO_DBGMSG("Retrying write_single_sector", sector, i);
+            if (write_single_sector(this, sector, src))
+            {
+                success = true;
+                break;
+            }
+        }
 
-    // // Cards up to 2GB use byte addressing, SDHC cards use sector addressing
-    // uint32_t address = (type() == SD_CARD_TYPE_SDHC) ? sector : (sector * 512);
+        if (!success)
+        {
+            SDIO_ERRMSG("SdioCard::writeSector failed", sector, 0);
+            return false;
+        }
+    }
 
-    // uint32_t reply;
-    // if (!checkReturnOk(rp2350_sdio_command_u32(16, 512, &reply, 0)) || // SET_BLOCKLEN
-    //     !checkReturnOk(rp2350_sdio_command_u32(CMD24, address, &reply, 0)) || // WRITE_BLOCK
-    //     !checkReturnOk(rp2350_sdio_tx_start(src, 1, SDIO_BLOCK_SIZE))) // Start transmission
-    // {
-    //     return false;
-    // }
-
-    // do {
-    //     uint32_t blocks_done;
-    //     g_sdio_error = rp2350_sdio_tx_poll(&blocks_done);
-
-    //     if (callback)
-    //     {
-    //         callback(g_sd_callback.bytes_start + blocks_done * SDIO_BLOCK_SIZE);
-    //     }
-    // } while (g_sdio_error == SDIO_BUSY);
-
-    // if (g_sdio_error != SDIO_OK)
-    // {
-    //     SDIO_ERRMSG("writeSector failed", sector, g_sdio_error);
-    // }
-
-    // return g_sdio_error == SDIO_OK;
+    return true;
 }
 
 bool SdioCard::writeSectors(uint32_t sector, const uint8_t* src, size_t n)
 {
-    if (true || ((uint32_t)src & 3) != 0)
+    if (n > 1 && ((uint32_t)src & 3) == 0 && sector + n < g_sdio_sector_count)
     {
-        // Unaligned write, execute sector-by-sector
-        for (size_t i = 0; i < n; i++)
+        SDIO_DBGMSG("writeSectors multi-block", sector, n);
+
+        // This is same as writeData() except we issue multi-sector transfer
+        // to the lower layer.
+        if (writeStart(sector) &&
+            checkReturnOk(rp2350_sdio_tx_start(src, n, SDIO_BLOCK_SIZE)))
         {
-            if (!writeSector(sector + i, src + 512 * i))
+            sd_callback_t callback = get_stream_callback(src, SDIO_BLOCK_SIZE * n, false, sector);
+
+            do {
+                uint32_t blocks_done;
+                g_sdio_error = rp2350_sdio_tx_poll(&blocks_done);
+
+                if (callback)
+                {
+                    callback(g_sd_callback.bytes_start + SDIO_BLOCK_SIZE * blocks_done);
+                }
+            } while (g_sdio_error == SDIO_BUSY);
+
+            if (g_sdio_error == SDIO_OK)
             {
-                return false;
+                m_curSector += n;
+                return true;
+            }
+            else
+            {
+                SDIO_ERRMSG("writeSectors multi-block failed", sector, g_sdio_error);
+                stopTransmission(true);
+                // Fall through to retry sector-by-sector
             }
         }
-        return true;
     }
 
-    sd_callback_t callback = get_stream_callback(src, n * 512, false, sector);
+    // Unaligned read or end-of-drive read, execute sector-by-sector
+    // Or if the multi-block read failed for some reason.
+    SDIO_DBGMSG("writeSectors single block", sector, 0);
 
-    // Cards up to 2GB use byte addressing, SDHC cards use sector addressing
-    uint32_t address = (type() == SD_CARD_TYPE_SDHC) ? sector : (sector * 512);
-
-    uint32_t reply;
-    if (!checkReturnOk(rp2350_sdio_command_u32(16, 512, &reply, 0)) || // SET_BLOCKLEN
-        !checkReturnOk(rp2350_sdio_command_u32(CMD55, g_sdio_rca, &reply, 0)) || // APP_CMD
-        !checkReturnOk(rp2350_sdio_command_u32(ACMD23, n, &reply, 0)) || // SET_WR_CLK_ERASE_COUNT
-        !checkReturnOk(rp2350_sdio_command_u32(CMD25, address, &reply, 0)) || // WRITE_MULTIPLE_BLOCK
-        !checkReturnOk(rp2350_sdio_tx_start(src, n, SDIO_BLOCK_SIZE))) // Start transmission
+    // Unaligned write, execute sector-by-sector
+    for (size_t i = 0; i < n; i++)
     {
-        return false;
-    }
-
-    do {
-        uint32_t blocks_done;
-        g_sdio_error = rp2350_sdio_tx_poll(&blocks_done);
-
-        if (callback)
+        if (!writeSector(sector + i, src + 512 * i))
         {
-            callback(g_sd_callback.bytes_start + blocks_done * SDIO_BLOCK_SIZE);
+            return false;
         }
-    } while (g_sdio_error == SDIO_BUSY);
-
-    if (g_sdio_error != SDIO_OK)
-    {
-        SDIO_ERRMSG("writeSectors failed", sector, g_sdio_error);
-        stopTransmission(true);
-        return false;
     }
-    else
-    {
-        // TODO: Instead of CMD12 stopTransmission command, according to SD spec we should send stopTran token.
-        // stopTransmission seems to work in practice.
-        return stopTransmission(true);
-    }
+    return true;
 }
 
 bool SdioCard::readSector(uint32_t sector, uint8_t* dst)
@@ -702,43 +799,47 @@ bool SdioCard::readSector(uint32_t sector, uint8_t* dst)
 
     SDIO_DBGMSG("readSector", sector, dst);
 
-    bool stat = read_single_sector(this, sector, dst);
+    if (!readStart(sector) || !readData(dst))
+    {
+        stopTransmission(true);
 
-    // if (!readStart(sector) || !readData(dst))
-    // {
-    //     stopTransmission(true);
-
-    //     // for (int i = 0; i < SDIO_MAX_RETRYCOUNT; i++)
-    //     // {
-    //     //     SDIO_DBGMSG("Retrying readSector", sector, i);
-    //     //     if (readSector(sector, dst))
-    //     //     {
-    //     //         return true;
-    //     //     }
-    //     // }
+        // Retry with the read_single_sector code, which is more fault-tolerant
+        bool success = false;
+        for (int i = 0; i < SDIO_MAX_RETRYCOUNT; i++)
+        {
+            SDIO_DBGMSG("Retrying read_single_sector", sector, i);
+            if (read_single_sector(this, sector, dst))
+            {
+                success = true;
+                break;
+            }
+        }
         
-    //     SDIO_ERRMSG("SdioCard::readSector failed", sector, 0);
-    //     return false;
-    // }
+        if (!success)
+        {
+            SDIO_ERRMSG("SdioCard::readSector failed", sector, 0);
+            return false;
+        }
+    }
 
     if (dst != real_dst)
     {
         memcpy(real_dst, g_sdio_tmp_buf, sizeof(g_sdio_tmp_buf));
     }
 
-    return stat;
+    return true;
 }
 
 bool SdioCard::readSectors(uint32_t sector, uint8_t* dst, size_t n)
 {
-    if (false && ((uint32_t)dst & 3) != 0 && sector + n < g_sdio_sector_count)
+    if (n > 1 && ((uint32_t)dst & 3) == 0 && sector + n < g_sdio_sector_count)
     {
         SDIO_DBGMSG("readSectors multi-block", sector, n);
 
         // This is same as readData() except we issue multi-sector transfer
         // to the lower layer.
         if (readStart(sector) &&
-            rp2350_sdio_rx_start(dst, n, SDIO_BLOCK_SIZE))
+            checkReturnOk(rp2350_sdio_rx_start(dst, n, SDIO_BLOCK_SIZE)))
         {
             sd_callback_t callback = get_stream_callback(dst, SDIO_BLOCK_SIZE * n, true, sector);
 
@@ -759,8 +860,9 @@ bool SdioCard::readSectors(uint32_t sector, uint8_t* dst, size_t n)
             }
             else
             {
-                SDIO_DBGMSG("readSectors multi-block failed", sector, g_sdio_error);
+                SDIO_ERRMSG("readSectors multi-block failed", sector, g_sdio_error);
                 stopTransmission(true);
+                // Fall through to retry sector-by-sector
             }
         }
     }

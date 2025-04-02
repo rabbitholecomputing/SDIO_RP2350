@@ -109,16 +109,15 @@
     .in 32 left auto 32
     .mov_status txfifo < 2  ; Check that command packet is ready to send before starting
 
-    mov OSR, NULL       side 1 [CMD_DELAY] ; Make sure OSR is full of zeros to prevent autopull
+    mov OSR, ~NULL       side 1 [CMD_DELAY] ; Make sure OSR is full to prevent autopull
 
 wait_cmd:
     mov Y, !STATUS      side 0 [CMD_DELAY] ; Check if TX FIFO has data, give idle clock
     jmp !Y wait_cmd     side 1 [CMD_DELAY]
 
 load_cmd:
-    out NULL, 32        side 0 [CMD_DELAY] ; Load first word (trigger autopull)
+    out pins, 32        side 0 [CMD_DELAY] ; Set CMD high, load first word (trigger autopull)
     out X, 8            side 1 [CMD_DELAY] ; Number of bits to send
-    set pins, 1         side 0 [CMD_DELAY] ; Initial state of CMD is high
     set pindirs, 1      side 1 [CMD_DELAY] ; Set SDIO_CMD as output
 
 send_cmd:
@@ -157,16 +156,15 @@ PUBLIC resp_done:
     .in 32 left auto 32
     .mov_status txfifo < 2  ; Check that command packet is ready to send before starting
 
-    mov OSR, NULL       side 1 [0]         ; Make sure OSR is full of zeros to prevent autopull
+    mov OSR, ~NULL      side 1 [0]         ; Make sure OSR is full to prevent autopull
 
 wait_cmd:
     mov Y, !STATUS      side 0 [CMD_DELAY] ; Check if TX FIFO has data, give idle clock
     jmp !Y wait_cmd     side 1 [CMD_DELAY]
 
 load_cmd:
-    out NULL, 32        side 0 [CMD_DELAY] ; Load first word (trigger autopull)
+    out pins, 32        side 0 [CMD_DELAY] ; Set CMD high, load first word (trigger autopull)
     out X, 8            side 1 [CMD_DELAY] ; Number of bits to send
-    set pins, 1         side 0 [CMD_DELAY] ; Initial state of CMD is high
     set pindirs, 1      side 1 [CMD_DELAY] ; Set SDIO_CMD as output
 
 send_cmd:
@@ -190,7 +188,7 @@ read_resp:
     jmp X-- read_resp   side 0 [CMD_DELAY]  ; Loop to receive all data bits
 
 PUBLIC resp_done:
-    push                side 0 [CMD_DELAY-1] ; Push the remaining part of response
+    push                side 1 [CMD_DELAY-1] ; Push the remaining part of response
 
 
 
@@ -218,11 +216,10 @@ PUBLIC resp_done:
     .side_set 1
     .out 4 left auto 32
     .in 32 left auto 32
-
-    mov X, Y                side 0  [CMD_DELAY]  ; Reinitialize number of nibbles to receive
+    .mov_status rxfifo < 1
 
 wait_start:
-    nop                     side 1  [CMD_DELAY]  ; Rising edge of CLK
+    mov X, Y                side 1  [CMD_DELAY]  ; Reinitialize number of nibbles to receive, rising edge of CLK
     jmp pin, wait_start     side 0  [CMD_DELAY]  ; Falling edge of CLK, check for zero state on D0
 
     nop                     side 1  [CMD_DELAY]  ; Issue next rising edge before entering the loop
@@ -231,6 +228,9 @@ rx_data:
     in PINS, 4              side 0  [CMD_DELAY]  ; Read input nibble, give falling edge
     jmp X--, rx_data        side 1  [CMD_DELAY]  ; Loop while reception continues
 
+wait_next:
+    mov X, STATUS           side 1  [0]          ; Check if DMA has read out the whole block
+    jmp !X, wait_next       side 1  [0]          ; Keep clock stopped until next block should start
 
 ; Data reception program (high speed)
 ; This differs from the above in that the card writes its outputs
@@ -242,11 +242,10 @@ rx_data:
     .side_set 1
     .out 4 left auto 32
     .in 32 left auto 32
-
-    mov X, Y                side 0  [0]  ; Reinitialize number of nibbles to receive
+    .mov_status rxfifo < 1
 
 wait_start:
-    nop                     side 1  [1]  ; Rising edge of CLK
+    mov X, Y                side 1  [1]  ; Reinitialize number of nibbles to receive, rising edge of CLK
     jmp pin, wait_start     side 0  [0]  ; Falling edge of CLK, check for zero state on D0
 
     nop                     side 1  [1]  ; Issue next rising edge before entering the loop
@@ -255,6 +254,10 @@ rx_data:
     in PINS, 4              side 0  [0]  ; Read input nibble, give falling edge
     jmp X--, rx_data        side 1  [1]  ; Loop while reception continues
 
+wait_next:
+    mov X, STATUS           side 1  [0]          ; Check if DMA has read out the whole block
+    jmp !X, wait_next       side 1  [0]          ; Keep clock stopped until next block should start
+
 ; Data reception program (high speed overclock)
 ; This uses the nominally 50 MHz SD card high-speed mode with 75 MHz
 ; clock. This is experimental.
@@ -262,11 +265,10 @@ rx_data:
     .side_set 1
     .out 4 left auto 32
     .in 32 left auto 32
-
-    mov X, Y                side 1  [0]  ; Reinitialize number of nibbles to receive
+    .mov_status rxfifo < 1
 
 wait_start:
-    nop                     side 0  [0]  ; Falling edge of CLK
+    mov X, Y                side 0  [0]  ; Reinitialize number of nibbles to receive, rising edge of CLK
     jmp pin, wait_start     side 1  [0]  ; Rising edge of CLK, check for zero state on D0 2 cycles after prev rising
 
     nop                     side 0  [0]  ; Issue next falling edge before entering the loop
@@ -274,6 +276,10 @@ wait_start:
 rx_data:
     in PINS, 4              side 1  [0]  ; Read input nibble, give next rising edge
     jmp X--, rx_data        side 0  [0]  ; Loop while reception continues
+
+wait_next:
+    mov X, STATUS           side 1  [0]          ; Check if DMA has read out the whole block
+    jmp !X, wait_next       side 1  [0]          ; Keep clock stopped until next block should start
 
 ; Data transmission program
 ;

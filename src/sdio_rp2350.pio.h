@@ -13,37 +13,36 @@
 // -------- //
 
 #define sdio_cmd_wrap_target 0
-#define sdio_cmd_wrap 16
+#define sdio_cmd_wrap 15
 #define sdio_cmd_pio_version 0
 
-#define sdio_cmd_offset_resp_done 16u
+#define sdio_cmd_offset_resp_done 15u
 
 static const uint16_t sdio_cmd_program_instructions[] = {
             //     .wrap_target
-    0xb2e3, //  0: mov    osr, null       side 1 [2] 
+    0xb2eb, //  0: mov    osr, !null      side 1 [2]
     0xa24d, //  1: mov    y, !status      side 0 [2] 
     0x1261, //  2: jmp    !y, 1           side 1 [2] 
-    0x6260, //  3: out    null, 32        side 0 [2] 
+    0x6200, //  3: out    pins, 32        side 0 [2]
     0x7228, //  4: out    x, 8            side 1 [2] 
-    0xe201, //  5: set    pins, 1         side 0 [2] 
-    0xf281, //  6: set    pindirs, 1      side 1 [2] 
-    0x6201, //  7: out    pins, 1         side 0 [2] 
-    0x1247, //  8: jmp    x--, 7          side 1 [2] 
-    0xe080, //  9: set    pindirs, 0      side 0     
-    0x6128, // 10: out    x, 8            side 0 [1] 
-    0x1230, // 11: jmp    !x, 16          side 1 [2] 
-    0x02cb, // 12: jmp    pin, 11         side 0 [2] 
-    0x5261, // 13: in     null, 1         side 1 [2] 
-    0x4201, // 14: in     pins, 1         side 0 [2] 
-    0x124e, // 15: jmp    x--, 14         side 1 [2] 
-    0x8220, // 16: push   block           side 0 [2] 
+    0xf281, //  5: set    pindirs, 1      side 1 [2]
+    0x6201, //  6: out    pins, 1         side 0 [2]
+    0x1246, //  7: jmp    x--, 6          side 1 [2]
+    0xe080, //  8: set    pindirs, 0      side 0
+    0x6128, //  9: out    x, 8            side 0 [1]
+    0x122f, // 10: jmp    !x, 15          side 1 [2]
+    0x02ca, // 11: jmp    pin, 10         side 0 [2]
+    0x5261, // 12: in     null, 1         side 1 [2]
+    0x4201, // 13: in     pins, 1         side 0 [2]
+    0x124d, // 14: jmp    x--, 13         side 1 [2]
+    0x8220, // 15: push   block           side 0 [2]
             //     .wrap
 };
 
 #if !PICO_NO_HARDWARE
 static const struct pio_program sdio_cmd_program = {
     .instructions = sdio_cmd_program_instructions,
-    .length = 17,
+    .length = 16,
     .origin = -1,
     .pio_version = sdio_cmd_pio_version,
 #if PICO_PIO_VERSION > 0
@@ -70,37 +69,36 @@ static inline pio_sm_config sdio_cmd_program_get_default_config(uint offset) {
 // ----------- //
 
 #define sdio_cmd_hs_wrap_target 0
-#define sdio_cmd_hs_wrap 16
+#define sdio_cmd_hs_wrap 15
 #define sdio_cmd_hs_pio_version 0
 
-#define sdio_cmd_hs_offset_resp_done 16u
+#define sdio_cmd_hs_offset_resp_done 15u
 
 static const uint16_t sdio_cmd_hs_program_instructions[] = {
             //     .wrap_target
-    0xb0e3, //  0: mov    osr, null       side 1     
+    0xb0eb, //  0: mov    osr, !null      side 1
     0xa24d, //  1: mov    y, !status      side 0 [2] 
     0x1261, //  2: jmp    !y, 1           side 1 [2] 
-    0x6260, //  3: out    null, 32        side 0 [2] 
+    0x6200, //  3: out    pins, 32        side 0 [2]
     0x7228, //  4: out    x, 8            side 1 [2] 
-    0xe201, //  5: set    pins, 1         side 0 [2] 
-    0xf281, //  6: set    pindirs, 1      side 1 [2] 
-    0x6201, //  7: out    pins, 1         side 0 [2] 
-    0x1247, //  8: jmp    x--, 7          side 1 [2] 
-    0xe280, //  9: set    pindirs, 0      side 0 [2] 
-    0x7228, // 10: out    x, 8            side 1 [2] 
-    0x0230, // 11: jmp    !x, 16          side 0 [2] 
-    0x12cb, // 12: jmp    pin, 11         side 1 [2] 
-    0x4261, // 13: in     null, 1         side 0 [2] 
-    0x5201, // 14: in     pins, 1         side 1 [2] 
-    0x024e, // 15: jmp    x--, 14         side 0 [2] 
-    0x8120, // 16: push   block           side 0 [1] 
+    0xf281, //  5: set    pindirs, 1      side 1 [2]
+    0x6201, //  6: out    pins, 1         side 0 [2]
+    0x1246, //  7: jmp    x--, 6          side 1 [2]
+    0xe280, //  8: set    pindirs, 0      side 0 [2]
+    0x7228, //  9: out    x, 8            side 1 [2]
+    0x022f, // 10: jmp    !x, 15          side 0 [2]
+    0x12ca, // 11: jmp    pin, 10         side 1 [2]
+    0x4261, // 12: in     null, 1         side 0 [2]
+    0x5201, // 13: in     pins, 1         side 1 [2]
+    0x024d, // 14: jmp    x--, 13         side 0 [2]
+    0x9120, // 15: push   block           side 1 [1]
             //     .wrap
 };
 
 #if !PICO_NO_HARDWARE
 static const struct pio_program sdio_cmd_hs_program = {
     .instructions = sdio_cmd_hs_program_instructions,
-    .length = 17,
+    .length = 16,
     .origin = -1,
     .pio_version = sdio_cmd_hs_pio_version,
 #if PICO_PIO_VERSION > 0
@@ -127,24 +125,25 @@ static inline pio_sm_config sdio_cmd_hs_program_get_default_config(uint offset) 
 // ------------ //
 
 #define sdio_data_rx_wrap_target 0
-#define sdio_data_rx_wrap 5
+#define sdio_data_rx_wrap 6
 #define sdio_data_rx_pio_version 0
 
 static const uint16_t sdio_data_rx_program_instructions[] = {
             //     .wrap_target
-    0xa222, //  0: mov    x, y            side 0 [2] 
-    0xb242, //  1: nop                    side 1 [2] 
-    0x02c1, //  2: jmp    pin, 1          side 0 [2] 
-    0xb242, //  3: nop                    side 1 [2] 
-    0x4204, //  4: in     pins, 4         side 0 [2] 
-    0x1244, //  5: jmp    x--, 4          side 1 [2] 
+    0xb222, //  0: mov    x, y            side 1 [2]
+    0x02c0, //  1: jmp    pin, 0          side 0 [2]
+    0xb242, //  2: nop                    side 1 [2]
+    0x4204, //  3: in     pins, 4         side 0 [2]
+    0x1243, //  4: jmp    x--, 3          side 1 [2]
+    0xb025, //  5: mov    x, status       side 1
+    0x1025, //  6: jmp    !x, 5           side 1
             //     .wrap
 };
 
 #if !PICO_NO_HARDWARE
 static const struct pio_program sdio_data_rx_program = {
     .instructions = sdio_data_rx_program_instructions,
-    .length = 6,
+    .length = 7,
     .origin = -1,
     .pio_version = sdio_data_rx_pio_version,
 #if PICO_PIO_VERSION > 0
@@ -160,6 +159,7 @@ static inline pio_sm_config sdio_data_rx_program_get_default_config(uint offset)
     sm_config_set_out_pin_count(&c, 4);
     sm_config_set_out_shift(&c, 0, 1, 32);
     sm_config_set_sideset(&c, 1, false, false);
+    sm_config_set_mov_status(&c, STATUS_RX_LESSTHAN, 1);
     return c;
 }
 #endif
@@ -169,24 +169,25 @@ static inline pio_sm_config sdio_data_rx_program_get_default_config(uint offset)
 // --------------- //
 
 #define sdio_data_rx_hs_wrap_target 0
-#define sdio_data_rx_hs_wrap 5
+#define sdio_data_rx_hs_wrap 6
 #define sdio_data_rx_hs_pio_version 0
 
 static const uint16_t sdio_data_rx_hs_program_instructions[] = {
             //     .wrap_target
-    0xa022, //  0: mov    x, y            side 0     
-    0xb142, //  1: nop                    side 1 [1] 
-    0x00c1, //  2: jmp    pin, 1          side 0     
-    0xb142, //  3: nop                    side 1 [1] 
-    0x4004, //  4: in     pins, 4         side 0     
-    0x1144, //  5: jmp    x--, 4          side 1 [1] 
+    0xb122, //  0: mov    x, y            side 1 [1]
+    0x00c0, //  1: jmp    pin, 0          side 0
+    0xb142, //  2: nop                    side 1 [1]
+    0x4004, //  3: in     pins, 4         side 0
+    0x1143, //  4: jmp    x--, 3          side 1 [1]
+    0xb025, //  5: mov    x, status       side 1
+    0x1025, //  6: jmp    !x, 5           side 1
             //     .wrap
 };
 
 #if !PICO_NO_HARDWARE
 static const struct pio_program sdio_data_rx_hs_program = {
     .instructions = sdio_data_rx_hs_program_instructions,
-    .length = 6,
+    .length = 7,
     .origin = -1,
     .pio_version = sdio_data_rx_hs_pio_version,
 #if PICO_PIO_VERSION > 0
@@ -202,6 +203,7 @@ static inline pio_sm_config sdio_data_rx_hs_program_get_default_config(uint offs
     sm_config_set_out_pin_count(&c, 4);
     sm_config_set_out_shift(&c, 0, 1, 32);
     sm_config_set_sideset(&c, 1, false, false);
+    sm_config_set_mov_status(&c, STATUS_RX_LESSTHAN, 1);
     return c;
 }
 #endif
@@ -211,24 +213,25 @@ static inline pio_sm_config sdio_data_rx_hs_program_get_default_config(uint offs
 // ------------------ //
 
 #define sdio_data_rx_hs_oc_wrap_target 0
-#define sdio_data_rx_hs_oc_wrap 5
+#define sdio_data_rx_hs_oc_wrap 6
 #define sdio_data_rx_hs_oc_pio_version 0
 
 static const uint16_t sdio_data_rx_hs_oc_program_instructions[] = {
             //     .wrap_target
-    0xb022, //  0: mov    x, y            side 1     
-    0xa042, //  1: nop                    side 0     
-    0x10c1, //  2: jmp    pin, 1          side 1     
-    0xa042, //  3: nop                    side 0     
-    0x5004, //  4: in     pins, 4         side 1     
-    0x0044, //  5: jmp    x--, 4          side 0     
+    0xa022, //  0: mov    x, y            side 0
+    0x10c0, //  1: jmp    pin, 0          side 1
+    0xa042, //  2: nop                    side 0
+    0x5004, //  3: in     pins, 4         side 1
+    0x0043, //  4: jmp    x--, 3          side 0
+    0xb025, //  5: mov    x, status       side 1
+    0x1025, //  6: jmp    !x, 5           side 1
             //     .wrap
 };
 
 #if !PICO_NO_HARDWARE
 static const struct pio_program sdio_data_rx_hs_oc_program = {
     .instructions = sdio_data_rx_hs_oc_program_instructions,
-    .length = 6,
+    .length = 7,
     .origin = -1,
     .pio_version = sdio_data_rx_hs_oc_pio_version,
 #if PICO_PIO_VERSION > 0
@@ -244,6 +247,7 @@ static inline pio_sm_config sdio_data_rx_hs_oc_program_get_default_config(uint o
     sm_config_set_out_pin_count(&c, 4);
     sm_config_set_out_shift(&c, 0, 1, 32);
     sm_config_set_sideset(&c, 1, false, false);
+    sm_config_set_mov_status(&c, STATUS_RX_LESSTHAN, 1);
     return c;
 }
 #endif

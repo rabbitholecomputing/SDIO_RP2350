@@ -36,9 +36,16 @@
 
 #include "sdio_rp2350.pio.h"
 
-enum sdio_transfer_state_t { SDIO_IDLE, SDIO_CLK_STOPPED, SDIO_RX, SDIO_TX, SDIO_TX_WAIT_IDLE};
+enum sdio_transfer_state_t {
+    SDIO_IDLE, // No transfer running, sdio_cmd program is giving continuous clock
+    SDIO_CLK_STOPPED,  // No transfer running, clock is stopped
+    SDIO_RX,        // Reception running
+    SDIO_RX_DONE,   // Reception done, clock is stopped (rx can be continued)
+    SDIO_TX,        // Transmission running
+    SDIO_TX_WAIT_IDLE, // Transmission done, clock is running, waiting for card not busy
+    SDIO_TX_DONE,   // Transmission done, clock is stopped (tx can be continued)
+};
 
-__attribute__((aligned(8))) // Alignment needed for dma_blocks ring buffer
 static struct {
     // Variables for data transfer
     sdio_transfer_state_t transfer_state;
@@ -71,7 +78,6 @@ static struct {
 
     // DMA configuration blocks
     // This is used to perform DMA into data buffers and checksum buffers separately.
-    __attribute__((aligned(8)))
     struct {
         void * write_addr;
         uint32_t transfer_count;
@@ -81,7 +87,7 @@ static struct {
     struct {
         uint32_t top;
         uint32_t bottom;
-    } received_checksums[SDIO_MAX_BLOCKS_PER_REQ];
+    } received_checksums[SDIO_MAX_BLOCKS_PER_REQ + 4];
 } g_sdio;
 
 
@@ -165,6 +171,20 @@ static uint64_t sdio_crc16_4bit_checksum(uint32_t *data, uint32_t num_words)
 /*******************************************************
  * Basic SDIO command execution
  *******************************************************/
+
+// This function can be used to hold CLK high while configuring state machines
+// Otherwise the side set pin can cause glitches when executing setup instructions
+static void sdio_enable_clk(bool enable)
+{
+    if (enable)
+    {
+        gpio_set_outover(SDIO_CLK, GPIO_OVERRIDE_NORMAL);
+    }
+    else
+    {
+        gpio_set_outover(SDIO_CLK, GPIO_OVERRIDE_HIGH);
+    }
+}
 
 sdio_status_t rp2350_sdio_command_u32(uint8_t command, uint32_t arg, uint32_t *response, uint32_t flags)
 {
@@ -320,10 +340,53 @@ sdio_status_t rp2350_sdio_command(uint8_t command, uint32_t arg, void *response,
 sdio_status_t rp2350_sdio_rx_start(uint8_t *buffer, uint32_t num_blocks, uint32_t blocksize = SDIO_BLOCK_SIZE)
 {
     // Buffer must be aligned
-    assert(((uint32_t)buffer & 3) == 0 && num_blocks <= SDIO_MAX_BLOCKS_PER_REQ);
+    if (((uint32_t)buffer & 3) != 0 || num_blocks > SDIO_MAX_BLOCKS_PER_REQ)
+    {
+        return SDIO_ERR_INVALID_PARAM;
+    }
 
-    pio_sm_set_enabled(SDIO_PIO, SDIO_SM, false);
-    pio_sm_clear_fifos(SDIO_PIO, SDIO_SM);
+    // If we are continuing a previous transfer, we don't
+    // need to reinitialize PIO and DMA.
+    if (g_sdio.transfer_state != SDIO_RX_DONE)
+    {
+        sdio_enable_clk(false);
+        pio_sm_set_enabled(SDIO_PIO, SDIO_SM, false);
+        pio_sm_clear_fifos(SDIO_PIO, SDIO_SM);
+
+        // Preconfigure first DMA channel for reading from the PIO RX fifo
+        dma_channel_config dmacfg = dma_channel_get_default_config(SDIO_DMACH_A);
+        channel_config_set_transfer_data_size(&dmacfg, DMA_SIZE_32);
+        channel_config_set_read_increment(&dmacfg, false);
+        channel_config_set_write_increment(&dmacfg, true);
+        channel_config_set_dreq(&dmacfg, pio_get_dreq(SDIO_PIO, SDIO_SM, false));
+        channel_config_set_bswap(&dmacfg, true);
+        channel_config_set_chain_to(&dmacfg, SDIO_DMACH_B);
+        dma_channel_configure(SDIO_DMACH_A, &dmacfg, 0, &SDIO_PIO->rxf[SDIO_SM], 0, false);
+
+        // Preconfigure second DMA channel for reconfiguring the first one
+        dmacfg = dma_channel_get_default_config(SDIO_DMACH_B);
+        channel_config_set_transfer_data_size(&dmacfg, DMA_SIZE_32);
+        channel_config_set_read_increment(&dmacfg, true);
+        channel_config_set_write_increment(&dmacfg, true);
+        channel_config_set_ring(&dmacfg, true, 3);
+        dma_channel_configure(SDIO_DMACH_B, &dmacfg, &dma_hw->ch[SDIO_DMACH_A].al1_write_addr,
+            g_sdio.dma_blocks, 2, false);
+
+        // Initialize PIO state machine
+        pio_sm_init(SDIO_PIO, SDIO_SM, g_sdio.pio_offset.data_rx, &g_sdio.pio_cfg.data_rx);
+        pio_sm_set_consecutive_pindirs(SDIO_PIO, SDIO_SM, SDIO_D0, 4, false);
+
+        // Write number of nibbles to receive to Y register
+        // 2 per byte, plus 16 for checksum, plus 8 for trailing clocks
+        // minus one because how PIO counter works
+        int nibbles = blocksize * 2 + 16 + 8 - 1;
+        pio_sm_put(SDIO_PIO, SDIO_SM, nibbles);
+        pio_sm_exec(SDIO_PIO, SDIO_SM, pio_encode_out(pio_y, 32));
+
+        // Enable RX FIFO join because we don't need the TX FIFO during transfer.
+        // This gives more leeway for the DMA block switching
+        SDIO_PIO->sm[SDIO_SM].shiftctrl |= PIO_SM0_SHIFTCTRL_FJOIN_RX_BITS;
+    }
 
     g_sdio.transfer_state = SDIO_RX;
     g_sdio.transfer_start_time = SDIO_TIME_US();
@@ -334,54 +397,60 @@ sdio_status_t rp2350_sdio_rx_start(uint8_t *buffer, uint32_t num_blocks, uint32_
     g_sdio.blocks_checksumed = 0;
     g_sdio.checksum_errors = 0;
 
-    // Create DMA block descriptors to store each block of blocksize bytes of data to buffer
-    // and then 8 bytes to g_sdio.received_checksums.
-    for (int i = 0; i < num_blocks; i++)
-    {
-        g_sdio.dma_blocks[i * 2].write_addr = buffer + i * blocksize;
-        g_sdio.dma_blocks[i * 2].transfer_count = blocksize / sizeof(uint32_t);
+    // Start first block reception as soon as possible, to avoid latency
+    // caused by initializing the dma blocks. By setting first DMA block to
+    // NULL values, we ensure the DMA stops if the transfer completes before
+    // next block is ready.
+    g_sdio.dma_blocks[0].transfer_count = 0;
+    g_sdio.dma_blocks[0].write_addr = 0;
+    dma_channel_set_read_addr(SDIO_DMACH_B, g_sdio.dma_blocks, false);
 
-        g_sdio.dma_blocks[i * 2 + 1].write_addr = &g_sdio.received_checksums[i];
-        g_sdio.dma_blocks[i * 2 + 1].transfer_count = 2;
-    }
-    g_sdio.dma_blocks[num_blocks * 2].write_addr = 0;
-    g_sdio.dma_blocks[num_blocks * 2].transfer_count = 0;
+    uint32_t words_per_block = blocksize / 4;
+    dma_channel_set_trans_count(SDIO_DMACH_A, words_per_block, false);
+    dma_channel_set_write_addr(SDIO_DMACH_A, buffer, true);
 
-    // Configure first DMA channel for reading from the PIO RX fifo
-    dma_channel_config dmacfg = dma_channel_get_default_config(SDIO_DMACH_A);
-    channel_config_set_transfer_data_size(&dmacfg, DMA_SIZE_32);
-    channel_config_set_read_increment(&dmacfg, false);
-    channel_config_set_write_increment(&dmacfg, true);
-    channel_config_set_dreq(&dmacfg, pio_get_dreq(SDIO_PIO, SDIO_SM, false));
-    channel_config_set_bswap(&dmacfg, true);
-    channel_config_set_chain_to(&dmacfg, SDIO_DMACH_B);
-    dma_channel_configure(SDIO_DMACH_A, &dmacfg, 0, &SDIO_PIO->rxf[SDIO_SM], 0, false);
-
-    // Configure second DMA channel for reconfiguring the first one
-    dmacfg = dma_channel_get_default_config(SDIO_DMACH_B);
-    channel_config_set_transfer_data_size(&dmacfg, DMA_SIZE_32);
-    channel_config_set_read_increment(&dmacfg, true);
-    channel_config_set_write_increment(&dmacfg, true);
-    channel_config_set_ring(&dmacfg, true, 3);
-    assert(((uint32_t)g_sdio.dma_blocks & 7) == 0); // DMA ring buffer requires alignment
-    dma_channel_configure(SDIO_DMACH_B, &dmacfg, &dma_hw->ch[SDIO_DMACH_A].al1_write_addr,
-        g_sdio.dma_blocks, 2, false);
-
-    // Initialize PIO state machine
-    pio_sm_init(SDIO_PIO, SDIO_SM, g_sdio.pio_offset.data_rx, &g_sdio.pio_cfg.data_rx);
-    pio_sm_set_consecutive_pindirs(SDIO_PIO, SDIO_SM, SDIO_D0, 4, false);
-
-    // Write number of nibbles to receive to Y register
-    pio_sm_put(SDIO_PIO, SDIO_SM, blocksize * 2 + 16 - 1);
-    pio_sm_exec(SDIO_PIO, SDIO_SM, pio_encode_out(pio_y, 32));
-
-    // Enable RX FIFO join because we don't need the TX FIFO during transfer.
-    // This gives more leeway for the DMA block switching
-    SDIO_PIO->sm[SDIO_SM].shiftctrl |= PIO_SM0_SHIFTCTRL_FJOIN_RX_BITS;
-
-    // Start PIO and DMA
-    dma_channel_start(SDIO_DMACH_B);
+    // Start the state machine
+    sdio_enable_clk(true);
     pio_sm_set_enabled(SDIO_PIO, SDIO_SM, true);
+
+    if (num_blocks > 1)
+    {
+        // Create DMA block descriptors to automatically start next block when previous
+        // completes.
+        for (int i = 0; i < num_blocks; i++)
+        {
+            if (i > 0)
+            {
+                // Copy block data
+                g_sdio.dma_blocks[i * 2].write_addr = buffer + i * blocksize;
+                g_sdio.dma_blocks[i * 2].transfer_count = blocksize / sizeof(uint32_t);
+            }
+
+            if (i < num_blocks - 1)
+            {
+                // Copy the checksum from the FIFO
+                // There is one extra word for the trailing clocks, this dummy value can go over the next checksum.
+                // This starts up the next reception
+                g_sdio.dma_blocks[i * 2 + 1].write_addr = &g_sdio.received_checksums[i];
+                g_sdio.dma_blocks[i * 2 + 1].transfer_count = 3;
+            }
+            else
+            {
+                // The checksum for last block will be left in the FIFO.
+                // This keeps the state machine stopped after last block.
+                g_sdio.dma_blocks[i * 2 + 1].write_addr = 0;
+                g_sdio.dma_blocks[i * 2 + 1].transfer_count = 0;
+            }
+        }
+
+        dma_channel_set_read_addr(SDIO_DMACH_B, &g_sdio.dma_blocks[1], false);
+
+        if (!dma_channel_is_busy(SDIO_DMACH_A))
+        {
+            SDIO_DBGMSG("Block transfer finished before DMA descriptors were done", 0, 0);
+            dma_channel_start(SDIO_DMACH_B);
+        }
+    }
 
     return SDIO_OK;
 }
@@ -389,7 +458,6 @@ sdio_status_t rp2350_sdio_rx_start(uint8_t *buffer, uint32_t num_blocks, uint32_
 // Check checksums for received blocks
 static void sdio_verify_rx_checksums(uint32_t maxcount)
 {
-    sio_hw->gpio_set = (1 << 30);
     while (g_sdio.blocks_checksumed < g_sdio.blocks_done && maxcount-- > 0)
     {
         // Calculate checksum from received data
@@ -403,6 +471,8 @@ static void sdio_verify_rx_checksums(uint32_t maxcount)
         uint32_t bottom = __builtin_bswap32(g_sdio.received_checksums[blockidx].bottom);
         uint64_t expected = ((uint64_t)top << 32) | bottom;
 
+        SDIO_DBGMSG("Checksums calc vs. received", (uint32_t)checksum, bottom);
+
         if (checksum != expected)
         {
             g_sdio.checksum_errors++;
@@ -412,7 +482,6 @@ static void sdio_verify_rx_checksums(uint32_t maxcount)
             }
         }
     }
-    sio_hw->gpio_clr = (1 << 30);
 }
 
 // Check if reception is complete
@@ -422,7 +491,7 @@ sdio_status_t rp2350_sdio_rx_poll(uint32_t *blocks_complete)
     // Was everything done when the previous rx_poll() finished?
     if (g_sdio.blocks_done >= g_sdio.total_blocks)
     {
-        g_sdio.transfer_state = SDIO_IDLE;
+        g_sdio.transfer_state = SDIO_RX_DONE;
     }
     else
     {
@@ -434,8 +503,36 @@ sdio_status_t rp2350_sdio_rx_poll(uint32_t *blocks_complete)
         dma_ctrl_block_count /= sizeof(g_sdio.dma_blocks[0]);
 
         // Compute how many complete 512 byte SDIO blocks have been transferred
-        // When transfer ends, dma_ctrl_block_count == g_sdio.total_blocks * 2 + 1
-        g_sdio.blocks_done = (dma_ctrl_block_count - 1) / 2;
+        // When transfer ends, dma_ctrl_block_count == g_sdio.total_blocks * 2
+        uint32_t blocks_done_dma = dma_ctrl_block_count / 2;
+
+        // Check if the DMA is all done.
+        // For single block transfers we have only one DMA control block (the null one)
+        if (blocks_done_dma == g_sdio.total_blocks ||
+            (g_sdio.total_blocks == 1 && dma_ctrl_block_count == 1))
+        {
+            // All blocks are done, but we still need the last checksum
+            // before we update g_sdio.blocks_done
+            if (pio_sm_get_rx_fifo_level(SDIO_PIO, SDIO_SM) >= 3)
+            {
+                // Stop the clock and copy last checksum from PIO FIFO.
+                sdio_enable_clk(false);
+                pio_sm_set_enabled(SDIO_PIO, SDIO_SM, false);
+
+                // DMA is set to byte-swap the data, so we need to byte swap
+                // these manually so that it will match.
+                g_sdio.received_checksums[g_sdio.total_blocks - 1].top = __builtin_bswap32(SDIO_PIO->rxf[SDIO_SM]);
+                g_sdio.received_checksums[g_sdio.total_blocks - 1].bottom = __builtin_bswap32(SDIO_PIO->rxf[SDIO_SM]);
+                (void)SDIO_PIO->rxf[SDIO_SM];
+
+                g_sdio.blocks_done = g_sdio.total_blocks;
+            }
+        }
+        else
+        {
+            // Not all blocks are yet done, but we can compute checksums that are done
+            g_sdio.blocks_done = blocks_done_dma;
+        }
 
         // NOTE: When all blocks are done, rx_poll() still returns SDIO_BUSY once.
         // This provides a chance to give application code an early callback before
@@ -448,7 +545,7 @@ sdio_status_t rp2350_sdio_rx_poll(uint32_t *blocks_complete)
         *blocks_complete = g_sdio.blocks_done;
     }
 
-    if (g_sdio.transfer_state == SDIO_IDLE)
+    if (g_sdio.transfer_state == SDIO_RX_DONE || g_sdio.transfer_state == SDIO_IDLE)
     {
         // Verify all remaining checksums.
         sdio_verify_rx_checksums(g_sdio.total_blocks);
@@ -474,51 +571,43 @@ sdio_status_t rp2350_sdio_rx_poll(uint32_t *blocks_complete)
 
  static void sdio_start_next_block_tx()
 {
-    // Initialize PIO
-    pio_sm_set_enabled(SDIO_PIO, SDIO_SM, false);
-    pio_sm_init(SDIO_PIO, SDIO_SM, g_sdio.pio_offset.data_tx, &g_sdio.pio_cfg.data_tx);
-    
-    // Configure DMA to send the data block payload
-    uint32_t words_per_block = g_sdio.blocksize / 4;
-    dma_channel_config dmacfg = dma_channel_get_default_config(SDIO_DMACH_A);
-    channel_config_set_transfer_data_size(&dmacfg, DMA_SIZE_32);
-    channel_config_set_read_increment(&dmacfg, true);
-    channel_config_set_write_increment(&dmacfg, false);
-    channel_config_set_dreq(&dmacfg, pio_get_dreq(SDIO_PIO, SDIO_SM, true));
-    channel_config_set_bswap(&dmacfg, true);
-    channel_config_set_chain_to(&dmacfg, SDIO_DMACH_B);
-    dma_channel_configure(SDIO_DMACH_A, &dmacfg,
-        &SDIO_PIO->txf[SDIO_SM], g_sdio.data_buf + g_sdio.blocks_done * words_per_block,
-        words_per_block, false);
-
     // Prepare second DMA channel to send the CRC and block end marker
     uint64_t crc = g_sdio.next_wr_block_checksum;
     g_sdio.end_token_buf[0] = (uint32_t)(crc >> 32);
     g_sdio.end_token_buf[1] = (uint32_t)(crc >>  0);
     g_sdio.end_token_buf[2] = 0xFFFFFFFF;
-    channel_config_set_bswap(&dmacfg, false);
-    dma_channel_configure(SDIO_DMACH_B, &dmacfg,
-        &SDIO_PIO->txf[SDIO_SM], g_sdio.end_token_buf, 3, false);
     
-    // Enable IRQ to trigger when block is done
-    dma_hw->irq_ctrl[SDIO_DMAIRQ_IDX].ints = 1 << SDIO_DMACH_B;
-    dma_hw->irq_ctrl[SDIO_DMAIRQ_IDX].inte |= 1 << SDIO_DMACH_B;
+    sdio_enable_clk(false);
+    pio_sm_set_enabled(SDIO_PIO, SDIO_SM, false);
 
     // Initialize register X with nibble count and register Y with response bit count
     pio_sm_put(SDIO_PIO, SDIO_SM, 8 + 2 * g_sdio.blocksize + 16 + 1 - 1);
     pio_sm_exec(SDIO_PIO, SDIO_SM, pio_encode_out(pio_x, 32));
-    pio_sm_put(SDIO_PIO, SDIO_SM, 31);
-    pio_sm_exec(SDIO_PIO, SDIO_SM, pio_encode_out(pio_y, 32));
-    
+    pio_sm_exec(SDIO_PIO, SDIO_SM, pio_encode_set(pio_y, 31));
+
     // Initialize pins to output and high
     pio_sm_exec(SDIO_PIO, SDIO_SM, pio_encode_set(pio_pins, 15));
     pio_sm_exec(SDIO_PIO, SDIO_SM, pio_encode_set(pio_pindirs, 15));
 
-    // Write start token and start the DMA transfer.
+    dma_channel_config dmacfg = dma_channel_get_default_config(SDIO_DMACH_B);
+    channel_config_set_transfer_data_size(&dmacfg, DMA_SIZE_32);
+    channel_config_set_read_increment(&dmacfg, true);
+    channel_config_set_write_increment(&dmacfg, false);
+    channel_config_set_dreq(&dmacfg, pio_get_dreq(SDIO_PIO, SDIO_SM, true));
+    dma_channel_configure(SDIO_DMACH_B, &dmacfg,
+        &SDIO_PIO->txf[SDIO_SM], &g_sdio.end_token_buf, 3, false);
+
+    // Write start token to FIFO directly
     pio_sm_put(SDIO_PIO, SDIO_SM, 0xFFFFFFF0);
-    dma_channel_start(SDIO_DMACH_A);
+
+    // Start DMA transfer to state machine
+    uint32_t words_per_block = g_sdio.blocksize / 4;
+    void *src = g_sdio.data_buf + g_sdio.blocks_done * words_per_block;
+    dma_channel_set_trans_count(SDIO_DMACH_A, words_per_block, false);
+    dma_channel_set_read_addr(SDIO_DMACH_A, src, true);
     
     // Start state machine
+    sdio_enable_clk(true);
     pio_sm_set_enabled(SDIO_PIO, SDIO_SM, true);
 }
 
@@ -535,7 +624,31 @@ static void sdio_compute_next_tx_checksum()
 sdio_status_t rp2350_sdio_tx_start(const uint8_t *buffer, uint32_t num_blocks, uint32_t blocksize)
 {
     // Buffer must be aligned
-    assert(((uint32_t)buffer & 3) == 0 && num_blocks <= SDIO_MAX_BLOCKS_PER_REQ);
+    if (((uint32_t)buffer & 3) != 0 || num_blocks > SDIO_MAX_BLOCKS_PER_REQ)
+    {
+        return SDIO_ERR_INVALID_PARAM;
+    }
+
+    // If we are continuing a previous transfer, we don't
+    // need to reinitialize PIO and DMA.
+    if (g_sdio.transfer_state != SDIO_TX_DONE)
+    {
+        // Initialize PIO
+        sdio_enable_clk(false);
+        pio_sm_set_enabled(SDIO_PIO, SDIO_SM, false);
+        pio_sm_init(SDIO_PIO, SDIO_SM, g_sdio.pio_offset.data_tx, &g_sdio.pio_cfg.data_tx);
+
+        // Preconfigure DMA to send the data block payload
+        dma_channel_config dmacfg = dma_channel_get_default_config(SDIO_DMACH_A);
+        channel_config_set_transfer_data_size(&dmacfg, DMA_SIZE_32);
+        channel_config_set_read_increment(&dmacfg, true);
+        channel_config_set_write_increment(&dmacfg, false);
+        channel_config_set_dreq(&dmacfg, pio_get_dreq(SDIO_PIO, SDIO_SM, true));
+        channel_config_set_bswap(&dmacfg, true);
+        channel_config_set_chain_to(&dmacfg, SDIO_DMACH_B);
+        dma_channel_configure(SDIO_DMACH_A, &dmacfg,
+            &SDIO_PIO->txf[SDIO_SM], 0, 0, false);
+    }
 
     g_sdio.transfer_state = SDIO_TX;
     g_sdio.transfer_start_time = SDIO_TIME_US();
@@ -549,6 +662,10 @@ sdio_status_t rp2350_sdio_tx_start(const uint8_t *buffer, uint32_t num_blocks, u
     // Compute first block checksum
     sdio_compute_next_tx_checksum();
 
+    // Interrupt mustn't fire before block checksum calculation is complete
+    dma_irqn_acknowledge_channel(SDIO_DMAIRQ_IDX, SDIO_DMACH_B);
+    dma_irqn_set_channel_enabled(SDIO_DMAIRQ_IDX, SDIO_DMACH_B, false);
+
     // Start first DMA transfer and PIO
     sdio_start_next_block_tx();
 
@@ -557,6 +674,9 @@ sdio_status_t rp2350_sdio_tx_start(const uint8_t *buffer, uint32_t num_blocks, u
         // Precompute second block checksum
         sdio_compute_next_tx_checksum();
     }
+
+    // Enable IRQ to trigger when block is done (it may already be)
+    dma_irqn_set_channel_enabled(SDIO_DMAIRQ_IDX, SDIO_DMACH_B, true);
 
     return SDIO_OK;
 }
@@ -599,7 +719,7 @@ sdio_status_t check_sdio_write_response(uint32_t card_response)
 // When a block finishes, this IRQ handler starts the next one
 static void rp2350_sdio_tx_irq()
 {
-    dma_hw->irq_ctrl[SDIO_DMAIRQ_IDX].ints = 1 << SDIO_DMACH_B;
+    dma_irqn_acknowledge_channel(SDIO_DMAIRQ_IDX, SDIO_DMACH_B);
 
     if (g_sdio.transfer_state == SDIO_TX)
     {
@@ -631,7 +751,10 @@ static void rp2350_sdio_tx_irq()
     {
         if (!dma_channel_is_busy(SDIO_DMACH_B))
         {
+            dma_irqn_acknowledge_channel(SDIO_DMAIRQ_IDX, SDIO_DMACH_B);
+
             g_sdio.wr_status = check_sdio_write_response(g_sdio.card_response);
+            g_sdio.card_response = 0xDEADBEEF;
 
             if (g_sdio.wr_status != SDIO_OK)
             {
@@ -654,7 +777,7 @@ static void rp2350_sdio_tx_irq()
             }
             else
             {
-                rp2350_sdio_stop();
+                g_sdio.transfer_state = SDIO_TX_DONE;
             }
         }    
     }
@@ -675,9 +798,8 @@ sdio_status_t rp2350_sdio_tx_poll(uint32_t *blocks_complete)
         *blocks_complete = g_sdio.blocks_done;
     }
 
-    if (g_sdio.transfer_state == SDIO_IDLE)
+    if (g_sdio.transfer_state == SDIO_TX_DONE || g_sdio.transfer_state == SDIO_IDLE)
     {
-        rp2350_sdio_stop();
         return g_sdio.wr_status;
     }
     else if (SDIO_ELAPSED_US(g_sdio.transfer_start_time) > SDIO_TRANSFER_TIMEOUT_US)
@@ -695,7 +817,8 @@ sdio_status_t rp2350_sdio_stop()
 {
     dma_channel_abort(SDIO_DMACH_A);
     dma_channel_abort(SDIO_DMACH_B);
-    dma_hw->irq_ctrl[SDIO_DMAIRQ_IDX].inte &= ~(1 << SDIO_DMACH_B);
+    dma_irqn_set_channel_enabled(SDIO_DMAIRQ_IDX, SDIO_DMACH_B, false);
+    sdio_enable_clk(false);
     pio_sm_set_enabled(SDIO_PIO, SDIO_SM, false);
     pio_sm_set_consecutive_pindirs(SDIO_PIO, SDIO_SM, SDIO_D0, 4, false);
     
@@ -704,23 +827,11 @@ sdio_status_t rp2350_sdio_stop()
     pio_sm_init(SDIO_PIO, SDIO_SM, g_sdio.pio_offset.sdio_cmd, &g_sdio.pio_cfg.sdio_cmd);
     pio_sm_set_consecutive_pindirs(SDIO_PIO, SDIO_SM, SDIO_CLK, 1, true);
     pio_sm_set_consecutive_pindirs(SDIO_PIO, SDIO_SM, SDIO_CMD, 1, false);
+    sdio_enable_clk(true);
     pio_sm_set_enabled(SDIO_PIO, SDIO_SM, true);
 
-    // Wait for card to be idle
-    uint32_t start = SDIO_TIME_US();
-    while (!gpio_get(SDIO_D0))
-    {
-        SDIO_BUSY_WAIT();
-
-        if (SDIO_ELAPSED_US(start) > SDIO_TRANSFER_TIMEOUT_US)
-        {
-            SDIO_ERRMSG("rp2350_sdio_stop timeout", 0, 0);
-            return SDIO_ERR_STOP_TIMEOUT;
-        }
-    }
-
     g_sdio.transfer_state = SDIO_IDLE;
-    return SDIO_OK;  
+    return SDIO_OK;
 }
 
 // Adjusts the delay cycles of instructions separately for "side 0" and "side 1" states.
@@ -744,7 +855,9 @@ static uint32_t adjust_clk_add_program(const struct pio_program *program, int ex
     pio_program new_prog = *program;
     new_prog.instructions = instructions;
 
-    return pio_add_program(SDIO_PIO, &new_prog);
+    int offset = pio_add_program(SDIO_PIO, &new_prog);
+    assert(offset >= 0);
+    return offset;
 }
 
 static void compute_prescaler_delay(int divider, int min_divider, int *prescaler, int *delay)

@@ -52,6 +52,7 @@ enum sdio_status_t {
     SDIO_ERR_WRITE_CRC = 7,        // Card reports bad CRC for write
     SDIO_ERR_WRITE_FAIL = 8,       // Card reports write failure
     SDIO_ERR_STOP_TIMEOUT = 9,     // Timeout waiting for card to be idle
+    SDIO_ERR_INVALID_PARAM = 10,   // Invalid parameters to function
 };
 
 // SDIO driver can optionally log debug and error messages.
@@ -86,7 +87,7 @@ enum sdio_status_t {
 
 // Maximum number of blocks queued for transmission or reception
 #ifndef SDIO_MAX_BLOCKS_PER_REQ
-#define SDIO_MAX_BLOCKS_PER_REQ 256
+#define SDIO_MAX_BLOCKS_PER_REQ 128
 #endif
 
 #ifndef SDIO_TIME_US
