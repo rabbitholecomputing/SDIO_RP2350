@@ -138,6 +138,8 @@ __attribute__((optimize("O3")))
 static uint64_t sdio_crc16_4bit_checksum(uint32_t *data, uint32_t num_words)
 {
     uint64_t crc = 0;
+
+#if defined(SDIO_CRC_NO_ASM) || !defined(__ARM_ARCH_8M_MAIN__)
     uint32_t *end = data + num_words;
     while (data < end)
     {
@@ -151,6 +153,7 @@ static uint64_t sdio_crc16_4bit_checksum(uint32_t *data, uint32_t num_words)
             uint32_t data_out = crc >> 32;
             crc <<= 32;
 
+#ifdef SDIO_CRC_ELABORATE
             // XOR outgoing data to itself with 4 bit delay
             data_out ^= (data_out >> 16);
 
@@ -162,8 +165,47 @@ static uint64_t sdio_crc16_4bit_checksum(uint32_t *data, uint32_t num_words)
             crc ^= xorred;
             crc ^= xorred << (5 * 4);
             crc ^= xorred << (12 * 4);
+#else
+            // This does the same as above, but in a sneakier way
+            // XOR outgoing and incoming data to accumulator at each tap
+            uint64_t xor32 = data_out ^ data_in;
+            xor32 ^= (xor32 >> 16);
+            uint64_t xor64 = xor32;
+            crc ^= xor64;
+            crc ^= xor64 << (5 * 4);
+            crc ^= xor64 << (12 * 4);
+#endif
         }
     }
+
+#else
+    uint32_t clo = 0, chi = 0;
+
+    // Handles 2 words interleaved to avoid result use latency
+    asm(R"(
+        ldm %[data]!, {r0, r4}          // Load source words to r0 and r4
+
+    1:
+        rev r0, r0                      //      First word bswap32
+        eor r1, %[chi], r0              //      xor32 = data_out ^ data_in => r1
+        subs %[cnt], %[cnt], #2         // num_words -= 2
+        eor r1, r1, r1, lsr #16         //      xor32 ^= (xor32 >> 16)
+        eor %[chi], %[clo], r1, lsr #12 //      crc = (crc << 32) ^ (xor64 << 20)
+        rev r4, r4                      //              Second word bswap32
+        eor %[chi], %[chi], r1, lsl #16 //      crc ^= xor64 << 48, chi is now done
+        eor %[clo], r1, r1, lsl #20     //      crc ^= xor64 << 20 (low part)
+        eor r5, %[chi], r4              //              xor32 = data_out ^ data_in => r5
+        ldm %[data]!, {r0, r4}          // Load next source words to r0 and r4
+        eor r5, r5, r5, lsr #16         //              xor32 ^= (xor32 >> 16)
+        eor %[chi], %[clo], r5, lsr #12 //              crc = (crc << 32) ^ (xor64 << 20)
+        eor %[clo], r5, r5, lsl #20     //              crc ^= xor64 << 20 (low part)
+        eor %[chi], %[chi], r5, lsl #16 //              crc ^= xor64 << 48, chi is now done
+        bne 1b                          // Loop until num_words = 0
+    )" : [cnt] "+r"(num_words), [data] "+r"(data), [clo] "+r"(clo), [chi] "+r"(chi)
+       : : "r0", "r1", "r4", "r5", "memory");
+
+    crc = ((uint64_t)chi << 32) | clo;
+#endif
 
     return crc;
 }
