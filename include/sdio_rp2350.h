@@ -115,7 +115,8 @@ enum sdio_status_t {
 // Prefetch buffer in SdioCard, bytes
 // Set to 0 to disable
 #ifndef SDIO_SDFAT_PREFETCH_BUFFER
-#define SDIO_SDFAT_PREFETCH_BUFFER 2048
+// TODO: Prefetch is issuing unnecessary StopTransmission() commands which kills performance
+#define SDIO_SDFAT_PREFETCH_BUFFER 0
 #endif
 
 // Number of retries for sector read/write

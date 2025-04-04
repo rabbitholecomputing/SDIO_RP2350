@@ -39,6 +39,20 @@ static uint32_t g_sdio_tmp_buf[SDIO_BLOCK_SIZE / 4];
 static uint32_t g_sdio_sector_count;
 static int g_sdio_clk_hz;
 
+#if SDIO_SDFAT_PREFETCH_BUFFER >= SDIO_BLOCK_SIZE
+#define USE_PREFETCH
+#define PREFETCH_BLOCKS (SDIO_SDFAT_PREFETCH_BUFFER / SDIO_BLOCK_SIZE)
+static uint32_t g_sdio_prefetch_buf[PREFETCH_BLOCKS][SDIO_BLOCK_SIZE / 4];
+static struct {
+    uint32_t sector; // First sector number of prefetch
+    uint32_t readcnt; // Total number of blocks that have been read out from the buffer
+    uint32_t writecnt; // Total number of blocks that have been written to the buffer
+
+    uint32_t prefetch_start; // Value of 'writecnt' when prefetch operation started
+    uint32_t prefetch_count; // Number of blocks queued for active read operation
+} g_sdio_prefetch;
+#endif
+
 #define checkReturnOk(call) ((g_sdio_error = (call)) == SDIO_OK ? true : logSDError(__LINE__))
 static bool logSDError(int line)
 {
@@ -227,6 +241,10 @@ bool SdioCard::begin(SdioConfig sdioConfig)
     sdio_status_t status;
     
     m_curState = IDLE_STATE;
+    memset(&g_sdio_prefetch, 0, sizeof(g_sdio_prefetch));
+    g_sdio_sector_count = 0;
+    g_sdio_error = SDIO_OK;
+    g_sdio_error_line = 0;
 
     // Initialize at 400 kHz clock speed
     rp2350_sdio_init(rp2350_sdio_get_timing(SDIO_INITIALIZE));
@@ -433,13 +451,175 @@ bool SdioCard::readOCR(uint32_t* ocr)
     return true;
 }
 
-bool SdioCard::readStart(uint32_t sector)
+#ifndef USE_PREFETCH
+static void prefetchClear() {}
+static bool prefetchIsEmpty() { return true; }
+static bool prefetchBusy(SdioCard *card) { return false; }
+static void prefetchProcess(SdioCard *card) {}
+static uint32_t prefetchStart(SdioCard *card, uint32_t sector) { return sector; }
+static bool prefetchSeek(SdioCard *card, uint32_t sector) { return false; }
+static void prefetchRead(SdioCard *card, uint8_t *dst)
 {
-    if (m_curState == READ_STATE && m_curSector == sector)
+    SDIO_ERRMSG("prefetchRead() called with prefetch disabled");
+    assert(false);
+}
+#else
+static void prefetchClear()
+{
+    memset(&g_sdio_prefetch, 0, sizeof(g_sdio_prefetch));
+}
+
+static bool prefetchIsEmpty()
+{
+    return g_sdio_prefetch.readcnt == g_sdio_prefetch.writecnt;
+}
+
+// Is a prefetch read operation in progress?
+static bool prefetchBusy(SdioCard *card)
+{
+    return g_sdio_prefetch.prefetch_count > 0;
+}
+
+// Process any received prefetch blocks
+static void prefetchProcess(SdioCard *card)
+{
+    if (!prefetchBusy(card))
     {
-        SDIO_DBGMSG("Continuing multi-sector read", sector, 0);
+        // Nothing in progress
+        return;
+    }
+
+    uint32_t blocks_done;
+    g_sdio_error = rp2350_sdio_rx_poll(&blocks_done);
+
+    g_sdio_prefetch.writecnt = g_sdio_prefetch.prefetch_start + blocks_done;
+
+    if (g_sdio_error == SDIO_BUSY)
+    {
+        // Still transferring
+        return;
+    }
+    else if (g_sdio_error == SDIO_OK)
+    {
+        SDIO_DBGMSG("Prefetch transfer done",
+            g_sdio_prefetch.sector + g_sdio_prefetch.prefetch_start,
+            g_sdio_prefetch.prefetch_count);
+        g_sdio_prefetch.prefetch_start = 0;
+        g_sdio_prefetch.prefetch_count = 0;
+    }
+    else
+    {
+        // Prefetch error
+        SDIO_ERRMSG("Prefetch failed",
+            g_sdio_prefetch.sector + g_sdio_prefetch.prefetch_start,
+            g_sdio_prefetch.prefetch_count);
+        card->stopTransmission(true);
+    }
+}
+
+// Start a prefetch read of as many sectors as will fit in the buffer.
+// Sector should be the index of next sector that is going to come from the card.
+static uint32_t prefetchStart(SdioCard *card, uint32_t sector)
+{
+    if (prefetchBusy(card))
+    {
+        // Previous operation is not yet finished
+        prefetchProcess(card);
+        if (prefetchBusy(card))
+        {
+            return sector;
+        }
+    }
+
+    uint32_t oldsector = g_sdio_prefetch.sector + g_sdio_prefetch.writecnt;
+    if (sector != oldsector)
+    {
+        SDIO_DBGMSG("Prefetch location changed", sector, oldsector);
+        prefetchClear();
+        g_sdio_prefetch.sector = sector;
+    }
+
+    // How many blocks can we read before buffer is full or wraps?
+    uint32_t buffer_fill = g_sdio_prefetch.writecnt - g_sdio_prefetch.readcnt;
+    uint32_t max_blocks = PREFETCH_BLOCKS - buffer_fill;
+    uint32_t writeidx = g_sdio_prefetch.writecnt % PREFETCH_BLOCKS;
+    uint32_t wrappos = PREFETCH_BLOCKS - writeidx;
+    if (max_blocks > wrappos) max_blocks = wrappos;
+
+    if (max_blocks == 0)
+    {
+        SDIO_DBGMSG("Prefetch buffer full", g_sdio_prefetch.writecnt, g_sdio_prefetch.readcnt);
+        return sector;
+    }
+
+    g_sdio_prefetch.prefetch_start = g_sdio_prefetch.writecnt;
+    g_sdio_prefetch.prefetch_count = max_blocks;
+
+    if (!checkReturnOk(rp2350_sdio_rx_start((uint8_t*)&g_sdio_prefetch_buf[writeidx], max_blocks, SDIO_BLOCK_SIZE)))
+    {
+        SDIO_ERRMSG("Prefetch read start failed", g_sdio_error, sector);
+        g_sdio_prefetch.prefetch_count = 0;
+        card->stopTransmission(true);
+    }
+
+    SDIO_DBGMSG("Prefetch read started", sector, max_blocks);
+    return sector + max_blocks;
+}
+
+// Query whether a given sector is available from prefetch buffer
+// and advance read pointer to it.
+static bool prefetchSeek(SdioCard *card, uint32_t sector)
+{
+    prefetchProcess(card);
+
+    if (sector < g_sdio_prefetch.sector + g_sdio_prefetch.readcnt)
+    {
+        SDIO_DBGMSG("Prefetch miss under", sector, g_sdio_prefetch.sector + g_sdio_prefetch.readcnt);
+        return false; // Sector has already been discarded or precedes operation
+    }
+    else if (sector >= g_sdio_prefetch.sector + g_sdio_prefetch.writecnt)
+    {
+        SDIO_DBGMSG("Prefetch miss over", sector, g_sdio_prefetch.sector + g_sdio_prefetch.writecnt);
+        return false; // Sector has not yet been fetched
+    }
+    else
+    {
+        g_sdio_prefetch.readcnt = sector - g_sdio_prefetch.sector;
+        SDIO_DBGMSG("Prefetch seek", sector, g_sdio_prefetch.readcnt);
         return true;
     }
+}
+
+// Copy data from prefetch read pointer and remove it from the buffer.
+// prefetchSeek() should be called before this.
+static void prefetchRead(SdioCard *card, uint8_t *dst)
+{
+    uint32_t pos = g_sdio_prefetch.readcnt % PREFETCH_BLOCKS;
+    SDIO_DBGMSG("Prefetch read", g_sdio_prefetch.sector + g_sdio_prefetch.readcnt, pos);
+    memcpy(dst, g_sdio_prefetch_buf[pos], SDIO_BLOCK_SIZE);
+    g_sdio_prefetch.readcnt++;
+}
+
+#endif /* USE_PREFETCH */
+
+bool SdioCard::readStart(uint32_t sector)
+{
+    if (m_curState == READ_STATE)
+    {
+        if (m_curSector == sector && !prefetchBusy(this))
+        {
+            SDIO_DBGMSG("Continuing multi-sector read", sector, 0);
+            prefetchClear();
+            return true;
+        }
+        else if (prefetchSeek(this, sector))
+        {
+            SDIO_DBGMSG("readStart: Block is available from prefetch", sector, 0);
+            return true;
+        }
+    }
+
+    prefetchClear();
 
     if (m_curState != IDLE_STATE)
     {
@@ -469,6 +649,14 @@ bool SdioCard::readData(uint8_t* dst)
     {
         SDIO_ERRMSG("readData() called when not in READ_STATE", (int)m_curState, dst);
         return false;
+    }
+
+    // If readStart() doesn't find data in prefetch buffer,
+    // it will clear it.
+    if (!prefetchIsEmpty())
+    {
+        prefetchRead(this, dst);
+        return true;
     }
 
     if (!checkReturnOk(rp2350_sdio_rx_start(dst, 1, SDIO_BLOCK_SIZE)))
@@ -532,6 +720,10 @@ bool SdioCard::stopTransmission(bool blocking)
     uint32_t reply;
     rp2350_sdio_command_u32(CMD12, 0, &reply, SDIO_FLAG_NO_LOGMSG);
     m_curState = IDLE_STATE;
+
+    // Invalidate prefetch and read/write pointer
+    m_curSector = 0;
+    prefetchClear();
     
     if (!blocking)
     {
@@ -738,6 +930,14 @@ bool SdioCard::writeSector(uint32_t sector, const uint8_t* src)
 
 bool SdioCard::writeSectors(uint32_t sector, const uint8_t* src, size_t n)
 {
+    while (n > SDIO_MAX_BLOCKS_PER_REQ)
+    {
+        // Split large requests
+        if (!writeSectors(sector, src, SDIO_MAX_BLOCKS_PER_REQ)) return false;
+        n -= SDIO_MAX_BLOCKS_PER_REQ;
+        src += SDIO_MAX_BLOCKS_PER_REQ * SDIO_BLOCK_SIZE;
+    }
+
     if (n > 1 && ((uint32_t)src & 3) == 0 && sector + n < g_sdio_sector_count)
     {
         SDIO_DBGMSG("writeSectors multi-block", sector, n);
@@ -822,6 +1022,8 @@ bool SdioCard::readSector(uint32_t sector, uint8_t* dst)
         }
     }
 
+    m_curSector = prefetchStart(this, m_curSector);
+
     if (dst != real_dst)
     {
         memcpy(real_dst, g_sdio_tmp_buf, sizeof(g_sdio_tmp_buf));
@@ -832,14 +1034,50 @@ bool SdioCard::readSector(uint32_t sector, uint8_t* dst)
 
 bool SdioCard::readSectors(uint32_t sector, uint8_t* dst, size_t n)
 {
-    if (n > 1 && ((uint32_t)dst & 3) == 0 && sector + n < g_sdio_sector_count)
+    while (n > SDIO_MAX_BLOCKS_PER_REQ)
+    {
+        // Split large requests
+        if (!readSectors(sector, dst, SDIO_MAX_BLOCKS_PER_REQ)) return false;
+        n -= SDIO_MAX_BLOCKS_PER_REQ;
+        dst += SDIO_MAX_BLOCKS_PER_REQ * SDIO_BLOCK_SIZE;
+    }
+
+    if (n > 1 && ((uint32_t)dst & 3) == 0 && sector + n < g_sdio_sector_count && readStart(sector))
     {
         SDIO_DBGMSG("readSectors multi-block", sector, n);
 
+        while (!prefetchIsEmpty() && n > 0)
+        {
+            sd_callback_t callback = get_stream_callback(dst, SDIO_BLOCK_SIZE, true, sector);
+            prefetchRead(this, dst);
+
+            if (callback)
+            {
+                callback(g_sd_callback.bytes_start + SDIO_BLOCK_SIZE);
+            }
+
+            dst += SDIO_BLOCK_SIZE;
+            n -= 1;
+            sector++;
+
+            while (prefetchIsEmpty() && prefetchBusy(this))
+            {
+                prefetchProcess(this);
+            }
+        }
+
+        if (n == 0)
+        {
+            SDIO_DBGMSG("readSectors satisfied from prefetch", 0, 0);
+            m_curSector = prefetchStart(this, m_curSector);
+            return true;
+        }
+
+        SDIO_DBGMSG("readSectors start receiving", sector, n);
+
         // This is same as readData() except we issue multi-sector transfer
         // to the lower layer.
-        if (readStart(sector) &&
-            checkReturnOk(rp2350_sdio_rx_start(dst, n, SDIO_BLOCK_SIZE)))
+        if (checkReturnOk(rp2350_sdio_rx_start(dst, n, SDIO_BLOCK_SIZE)))
         {
             sd_callback_t callback = get_stream_callback(dst, SDIO_BLOCK_SIZE * n, true, sector);
 
@@ -856,6 +1094,7 @@ bool SdioCard::readSectors(uint32_t sector, uint8_t* dst, size_t n)
             if (g_sdio_error == SDIO_OK)
             {
                 m_curSector += n;
+                m_curSector = prefetchStart(this, m_curSector);
                 return true;
             }
             else
