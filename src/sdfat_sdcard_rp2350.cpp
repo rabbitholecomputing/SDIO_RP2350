@@ -61,6 +61,8 @@ static bool logSDError(int line)
     return false;
 }
 
+static void prefetchClear();
+
 // Optional callback can be used to do co-operative multitasking while SdFat is reading data.
 // When a transfer to/from buffer is detected, callback gets called during transfer.
 static struct {
@@ -241,7 +243,7 @@ bool SdioCard::begin(SdioConfig sdioConfig)
     sdio_status_t status;
     
     m_curState = IDLE_STATE;
-    memset(&g_sdio_prefetch, 0, sizeof(g_sdio_prefetch));
+    prefetchClear();
     g_sdio_sector_count = 0;
     g_sdio_error = SDIO_OK;
     g_sdio_error_line = 0;
@@ -460,7 +462,7 @@ static uint32_t prefetchStart(SdioCard *card, uint32_t sector) { return sector; 
 static bool prefetchSeek(SdioCard *card, uint32_t sector) { return false; }
 static void prefetchRead(SdioCard *card, uint8_t *dst)
 {
-    SDIO_ERRMSG("prefetchRead() called with prefetch disabled");
+    SDIO_ERRMSG("prefetchRead() called with prefetch disabled", 0, 0);
     assert(false);
 }
 #else
