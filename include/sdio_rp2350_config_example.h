@@ -10,14 +10,34 @@
 // #define SDIO_ERRMSG(txt, arg1, arg2) sdio_log(txt, arg1, arg2)
 // #define SDIO_DBGMSG(txt, arg1, arg2) sdio_log(txt, arg1, arg2)
 
-// Optional timing dividers
-// #define SDIO_CLOCKDIV_INIT 400
-// #define SDIO_CLOCKDIV_CMD  1
-// #define SDIO_CLOCKDIV_DATA 1
-
-// Block size shouldn't be changed, but request queue size can be adjusted.
-// #define SDIO_BLOCK_SIZE 512
+// Maximum number of blocks queued for transmission or reception
 // #define SDIO_MAX_BLOCKS_PER_REQ 128
+
+// Timeouts for operations, in microseconds
+// #define SDIO_CMD_TIMEOUT_US 2000
+// #define SDIO_TRANSFER_TIMEOUT_US (1000 * 1000)
+// #define SDIO_INIT_TIMEOUT_US (1000 * 1000)
+
+// Enable the definition of SdFat library SdioCard class
+// #define SDIO_USE_SDFAT 1
+
+// Prefetch buffer in SdioCard, bytes
+// Set to 0 to disable
+// #define SDIO_SDFAT_PREFETCH_BUFFER 2048
+
+// Number of retries for sector read/write
+// #define SDIO_MAX_RETRYCOUNT 1
+
+// When testing SDIO communication during init, which sector to read/write
+// #define SDIO_COMMUNICATION_TEST_SECTOR_IDX 0
+
+// Enable write check during initialization
+// This writes back the same data as was read from the SD card
+// #define SDIO_COMMUNICATION_TEST_DO_WRITE 1
+
+// Default speed to use for SDIO communication
+// If communication doesn't work, speed is automatically dropped
+// #define SDIO_DEFAULT_SPEED SDIO_HIGHSPEED
 
 // PIO block to use
 #define SDIO_PIO pio1

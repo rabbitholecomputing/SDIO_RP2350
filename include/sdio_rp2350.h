@@ -65,18 +65,6 @@ enum sdio_status_t {
 #define SDIO_DBGMSG(txt, arg1, arg2)
 #endif
 
-#ifndef SDIO_CLOCKDIV_INIT
-#define SDIO_CLOCKDIV_INIT 400
-#endif
-
-#ifndef SDIO_CLOCKDIV_CMD
-#define SDIO_CLOCKDIV_CMD 1
-#endif
-
-#ifndef SDIO_CLOCKDIV_DATA
-#define SDIO_CLOCKDIV_DATA 1
-#endif
-
 #ifndef SDIO_BLOCK_SIZE
 #define SDIO_BLOCK_SIZE 512
 #endif
@@ -110,36 +98,52 @@ enum sdio_status_t {
 #define SDIO_BUSY_WAIT()
 #endif
 
+// Timeout for executing SDIO commands
 #ifndef SDIO_CMD_TIMEOUT_US
 #define SDIO_CMD_TIMEOUT_US 2000
 #endif
 
+// Timeout for read/write transfers, total
 #ifndef SDIO_TRANSFER_TIMEOUT_US
-#define SDIO_TRANSFER_TIMEOUT_US 1000000
+#define SDIO_TRANSFER_TIMEOUT_US (1000 * 1000)
 #endif
 
+// Tiemout for card initialization
 #ifndef SDIO_INIT_TIMEOUT_US
-#define SDIO_INIT_TIMEOUT_US 1000000
+#define SDIO_INIT_TIMEOUT_US (1000 * 1000)
 #endif
 
+// Enable the definition of SdFat library SdioCard class
 #ifndef SDIO_USE_SDFAT
 #define SDIO_USE_SDFAT 1
 #endif
 
+// Prefetch buffer in SdioCard, bytes
+// Set to 0 to disable
+#ifndef SDIO_SDFAT_PREFETCH_BUFFER
+#define SDIO_SDFAT_PREFETCH_BUFFER 2048
+#endif
+
+// Number of retries for sector read/write
 #ifndef SDIO_MAX_RETRYCOUNT
 #define SDIO_MAX_RETRYCOUNT 1
 #endif
 
+// When testing SDIO communication during init, which sector to read/write
 #ifndef SDIO_COMMUNICATION_TEST_SECTOR_IDX
 #define SDIO_COMMUNICATION_TEST_SECTOR_IDX 0
 #endif
 
+// Enable write check during initialization
+// This writes back the same data as was read from the SD card
 #ifndef SDIO_COMMUNICATION_TEST_DO_WRITE
 #define SDIO_COMMUNICATION_TEST_DO_WRITE 1
 #endif
 
+// Default speed to use for SDIO communication
+// If communication doesn't work, speed is automatically dropped
 #ifndef SDIO_DEFAULT_SPEED
-#define SDIO_DEFAULT_SPEED SDIO_HIGHSPEED_OVERCLOCK
+#define SDIO_DEFAULT_SPEED SDIO_HIGHSPEED
 #endif
 
 #ifndef SDIO_CARD_OCR_MODE
