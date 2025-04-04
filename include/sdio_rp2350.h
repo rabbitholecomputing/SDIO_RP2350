@@ -92,12 +92,6 @@ enum sdio_status_t {
 #define SDIO_WAIT_US(x) (busy_wait_us_32((x)))
 #endif
 
-// This can be defined to call RTOS yield command
-// while waiting for SD card.
-#ifndef SDIO_BUSY_WAIT
-#define SDIO_BUSY_WAIT()
-#endif
-
 // Timeout for executing SDIO commands
 #ifndef SDIO_CMD_TIMEOUT_US
 #define SDIO_CMD_TIMEOUT_US 2000
@@ -175,6 +169,7 @@ sdio_status_t rp2350_sdio_command_u32(uint8_t command, uint32_t arg, uint32_t *r
 sdio_status_t rp2350_sdio_command(uint8_t command, uint32_t arg, void *response, int resp_bytes, uint32_t flags);
 
 // Start transferring data from SD card to memory buffer
+// Memory buffer must be aligned to word boundary
 sdio_status_t rp2350_sdio_rx_start(uint8_t *buffer, uint32_t num_blocks, uint32_t blocksize);
 
 // Check if reception is complete
@@ -183,6 +178,7 @@ sdio_status_t rp2350_sdio_rx_start(uint8_t *buffer, uint32_t num_blocks, uint32_
 sdio_status_t rp2350_sdio_rx_poll(uint32_t *blocks_complete);
 
 // Start transferring data from memory to SD card
+// Memory buffer must be aligned to word boundary
 sdio_status_t rp2350_sdio_tx_start(const uint8_t *buffer, uint32_t num_blocks, uint32_t blocksize);
 
 // Check if transmission is complete

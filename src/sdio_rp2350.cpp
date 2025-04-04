@@ -447,6 +447,9 @@ sdio_status_t rp2350_sdio_rx_start(uint8_t *buffer, uint32_t num_blocks, uint32_
     g_sdio.dma_blocks[0].write_addr = 0;
     dma_channel_set_read_addr(SDIO_DMACH_B, g_sdio.dma_blocks, false);
 
+    // IRQ handler will verify checksums
+    dma_irqn_set_channel_enabled(SDIO_DMAIRQ_IDX, SDIO_DMACH_B, true);
+
     uint32_t words_per_block = blocksize / 4;
     dma_channel_set_trans_count(SDIO_DMACH_A, words_per_block, false);
     dma_channel_set_write_addr(SDIO_DMACH_A, buffer, true);
@@ -497,10 +500,70 @@ sdio_status_t rp2350_sdio_rx_start(uint8_t *buffer, uint32_t num_blocks, uint32_
     return SDIO_OK;
 }
 
-// Check checksums for received blocks
-static void sdio_verify_rx_checksums(uint32_t maxcount)
+static void sdio_update_rx_blocks_done()
 {
-    while (g_sdio.blocks_checksumed < g_sdio.blocks_done && maxcount-- > 0)
+    if (g_sdio.blocks_done == g_sdio.total_blocks)
+    {
+        // Already done
+        return;
+    }
+
+    // Check how many DMA control blocks have been consumed
+    uint32_t dma_ctrl_block_count = (dma_hw->ch[SDIO_DMACH_B].read_addr - (uint32_t)g_sdio.dma_blocks);
+    dma_ctrl_block_count /= sizeof(g_sdio.dma_blocks[0]);
+
+    // Compute how many complete 512 byte SDIO blocks have been transferred
+    // When transfer ends, dma_ctrl_block_count == g_sdio.total_blocks * 2
+    // but the last checksum isn't yet done.
+    uint32_t blocks_done_dma = 0;
+    if (dma_ctrl_block_count > 1)
+        blocks_done_dma = (dma_ctrl_block_count - 1) / 2;
+
+    // Check if the DMA is all done.
+    // For single block transfers we have only one DMA control block (the null one)
+    if (dma_ctrl_block_count == g_sdio.total_blocks * 2 ||
+        (dma_ctrl_block_count == 1 && g_sdio.total_blocks == 1))
+    {
+        // All blocks are done, but we still need the last checksum
+        // before we update g_sdio.blocks_done. We cannot use DMA
+        // easily here because we need to stop the clock before
+        // reading the FIFO. But normally the checksum has already
+        // been received during the IRQ latency.
+        uint32_t start = SDIO_TIME_US();
+        while (pio_sm_get_rx_fifo_level(SDIO_PIO, SDIO_SM) < 3)
+        {
+            if (SDIO_ELAPSED_US(start) > SDIO_CMD_TIMEOUT_US)
+            {
+                SDIO_ERRMSG("Checksum reception timeout", pio_sm_get_rx_fifo_level(SDIO_PIO, SDIO_SM), 0);
+                g_sdio.checksum_errors++;
+                break;
+            }
+        }
+
+        // Stop the clock and copy last checksum from PIO FIFO.
+        sdio_enable_clk(false);
+        pio_sm_set_enabled(SDIO_PIO, SDIO_SM, false);
+
+        // DMA is set to byte-swap the data, so we need to byte swap
+        // these manually so that it will match.
+        g_sdio.received_checksums[g_sdio.total_blocks - 1].top = __builtin_bswap32(SDIO_PIO->rxf[SDIO_SM]);
+        g_sdio.received_checksums[g_sdio.total_blocks - 1].bottom = __builtin_bswap32(SDIO_PIO->rxf[SDIO_SM]);
+        (void)SDIO_PIO->rxf[SDIO_SM];
+
+        g_sdio.blocks_done = g_sdio.total_blocks;
+    }
+    else
+    {
+        // Not all blocks are yet done, but report to application the status
+        g_sdio.blocks_done = blocks_done_dma;
+    }
+}
+
+// Check checksums for received blocks
+// Called from interrupt
+static void sdio_verify_rx_checksums()
+{
+    while (g_sdio.blocks_checksumed < g_sdio.blocks_done)
     {
         // Calculate checksum from received data
         int blockidx = g_sdio.blocks_checksumed++;
@@ -513,16 +576,18 @@ static void sdio_verify_rx_checksums(uint32_t maxcount)
         uint32_t bottom = __builtin_bswap32(g_sdio.received_checksums[blockidx].bottom);
         uint64_t expected = ((uint64_t)top << 32) | bottom;
 
-        SDIO_DBGMSG("Checksums calc vs. received", (uint32_t)checksum, bottom);
-
         if (checksum != expected)
         {
             g_sdio.checksum_errors++;
             if (g_sdio.checksum_errors == 1)
             {
-                SDIO_ERRMSG("SDIO checksum error in data reception", blockidx, g_sdio.total_blocks);
+                SDIO_ERRMSG("SDIO checksum error in data reception", (uint32_t)checksum, bottom);
             }
         }
+
+        // The checksums have now been read and shouldn't be mistaken for any other block
+        g_sdio.received_checksums[blockidx].top = 0xDEADBEEF;
+        g_sdio.received_checksums[blockidx].bottom = 0xDEADBEEF;
     }
 }
 
@@ -530,72 +595,26 @@ static void sdio_verify_rx_checksums(uint32_t maxcount)
 // Returns SDIO_BUSY while transferring, SDIO_OK when done and error on failure.
 sdio_status_t rp2350_sdio_rx_poll(uint32_t *blocks_complete)
 {
-    // Was everything done when the previous rx_poll() finished?
-    if (g_sdio.blocks_done >= g_sdio.total_blocks)
-    {
-        g_sdio.transfer_state = SDIO_RX_DONE;
-    }
-    else
-    {
-        // Use the idle time to calculate checksums
-        sdio_verify_rx_checksums(4);
-
-        // Check how many DMA control blocks have been consumed
-        uint32_t dma_ctrl_block_count = (dma_hw->ch[SDIO_DMACH_B].read_addr - (uint32_t)&g_sdio.dma_blocks);
-        dma_ctrl_block_count /= sizeof(g_sdio.dma_blocks[0]);
-
-        // Compute how many complete 512 byte SDIO blocks have been transferred
-        // When transfer ends, dma_ctrl_block_count == g_sdio.total_blocks * 2
-        uint32_t blocks_done_dma = dma_ctrl_block_count / 2;
-
-        // Check if the DMA is all done.
-        // For single block transfers we have only one DMA control block (the null one)
-        if (blocks_done_dma == g_sdio.total_blocks ||
-            (g_sdio.total_blocks == 1 && dma_ctrl_block_count == 1))
-        {
-            // All blocks are done, but we still need the last checksum
-            // before we update g_sdio.blocks_done
-            if (pio_sm_get_rx_fifo_level(SDIO_PIO, SDIO_SM) >= 3)
-            {
-                // Stop the clock and copy last checksum from PIO FIFO.
-                sdio_enable_clk(false);
-                pio_sm_set_enabled(SDIO_PIO, SDIO_SM, false);
-
-                // DMA is set to byte-swap the data, so we need to byte swap
-                // these manually so that it will match.
-                g_sdio.received_checksums[g_sdio.total_blocks - 1].top = __builtin_bswap32(SDIO_PIO->rxf[SDIO_SM]);
-                g_sdio.received_checksums[g_sdio.total_blocks - 1].bottom = __builtin_bswap32(SDIO_PIO->rxf[SDIO_SM]);
-                (void)SDIO_PIO->rxf[SDIO_SM];
-
-                g_sdio.blocks_done = g_sdio.total_blocks;
-            }
-        }
-        else
-        {
-            // Not all blocks are yet done, but we can compute checksums that are done
-            g_sdio.blocks_done = blocks_done_dma;
-        }
-
-        // NOTE: When all blocks are done, rx_poll() still returns SDIO_BUSY once.
-        // This provides a chance to give application code an early callback before
-        // last checksums are computed. Any checksum failures are indicated after
-        // the whole transfer has finished.
-    }
-
     if (blocks_complete)
     {
         *blocks_complete = g_sdio.blocks_done;
     }
 
+    if (g_sdio.checksum_errors > 0)
+    {
+        SDIO_ERRMSG("SDIO checksum error in read", g_sdio.blocks_checksumed, g_sdio.total_blocks);
+        rp2350_sdio_stop();
+        return SDIO_ERR_DATA_CRC;
+    }
+
+    if (g_sdio.blocks_checksumed == g_sdio.total_blocks)
+    {
+        g_sdio.transfer_state = SDIO_RX_DONE;
+    }
+
     if (g_sdio.transfer_state == SDIO_RX_DONE || g_sdio.transfer_state == SDIO_IDLE)
     {
-        // Verify all remaining checksums.
-        sdio_verify_rx_checksums(g_sdio.total_blocks);
-
-        if (g_sdio.checksum_errors == 0)
-            return SDIO_OK;
-        else
-            return SDIO_ERR_DATA_CRC;
+        return SDIO_OK;
     }
     else if (SDIO_ELAPSED_US(g_sdio.transfer_start_time) > SDIO_TRANSFER_TIMEOUT_US)
     {
@@ -759,9 +778,15 @@ sdio_status_t check_sdio_write_response(uint32_t card_response)
 }
 
 // When a block finishes, this IRQ handler starts the next one
-static void rp2350_sdio_tx_irq()
+static void rp2350_sdio_dma_irq()
 {
     dma_irqn_acknowledge_channel(SDIO_DMAIRQ_IDX, SDIO_DMACH_B);
+
+    if (g_sdio.transfer_state == SDIO_RX)
+    {
+        sdio_update_rx_blocks_done();
+        sdio_verify_rx_checksums();
+    }
 
     if (g_sdio.transfer_state == SDIO_TX)
     {
@@ -832,7 +857,7 @@ sdio_status_t rp2350_sdio_tx_poll(uint32_t *blocks_complete)
     if (scb_hw->icsr & (0x1FFUL))
     {
         // Verify that IRQ handler gets called even if we are in hardfault handler
-        rp2350_sdio_tx_irq();
+        rp2350_sdio_dma_irq();
     }
 
     if (blocks_complete)
@@ -857,9 +882,9 @@ sdio_status_t rp2350_sdio_tx_poll(uint32_t *blocks_complete)
 // Force everything to idle state
 sdio_status_t rp2350_sdio_stop()
 {
+    dma_irqn_set_channel_enabled(SDIO_DMAIRQ_IDX, SDIO_DMACH_B, false);
     dma_channel_abort(SDIO_DMACH_A);
     dma_channel_abort(SDIO_DMACH_B);
-    dma_irqn_set_channel_enabled(SDIO_DMAIRQ_IDX, SDIO_DMACH_B, false);
     sdio_enable_clk(false);
     pio_sm_set_enabled(SDIO_PIO, SDIO_SM, false);
     pio_sm_set_consecutive_pindirs(SDIO_PIO, SDIO_SM, SDIO_D0, 4, false);
@@ -1125,7 +1150,7 @@ void rp2350_sdio_init(rp2350_sdio_timing_t timing)
     }
     
     // Set up IRQ handler when DMA completes.
-    irq_set_exclusive_handler(SDIO_DMAIRQ, rp2350_sdio_tx_irq);
+    irq_set_exclusive_handler(SDIO_DMAIRQ, rp2350_sdio_dma_irq);
     irq_set_enabled(SDIO_DMAIRQ, true);
 
     // Go to idle state
