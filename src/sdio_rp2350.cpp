@@ -960,36 +960,41 @@ static uint32_t clamp(uint32_t x, uint32_t min, uint32_t max)
     return x;
 }
 
+
 rp2350_sdio_timing_t rp2350_sdio_get_timing(rp2350_sdio_mode_t mode)
 {
     rp2350_sdio_timing_t result = {};
     result.mode = mode;
 
     uint32_t sys_clk = clock_get_hz(clk_sys);
-    uint32_t divider = 0;
+    uint32_t target_hz = 0;
     
     if (mode == SDIO_INITIALIZE)
     {
-        divider = sys_clk / 400000;
+        target_hz = 400000;
     }
     else if (mode == SDIO_MMC)
     {
-        divider = sys_clk / 20000000;
+        target_hz = 20000000;
     }
     else if (mode == SDIO_STANDARD)
     {
-        divider = sys_clk / 25000000;
+        target_hz = 25000000;
     }
     else if (mode == SDIO_HIGHSPEED)
     {
-        divider = sys_clk / 50000000;
+        target_hz = 50000000;
         result.use_high_speed = true;
     }
     else if (mode == SDIO_HIGHSPEED_OVERCLOCK)
     {
-        divider = sys_clk / 75000000;
+        target_hz = 75000000;
         result.use_high_speed = true;
     }
+
+    uint32_t divider = sys_clk / target_hz;
+    uint32_t actual_hz = sys_clk / divider;
+    if (actual_hz > target_hz * 11 / 10) divider++; // Rounding error exceeded 10%
 
     result.cmd_clk_divider = clamp(divider, SDIO_MIN_CMD_CLK_DIVIDER, SDIO_MAX_CMD_CLK_DIVIDER);
 

@@ -260,6 +260,7 @@ bool SdioCard::begin(SdioConfig sdioConfig)
         SDIO_WAIT_US(1000);
         reply = 0;
         rp2350_sdio_command(CMD0, 0, NULL, 0, SDIO_FLAG_NO_LOGMSG); // GO_IDLE_STATE
+        SDIO_WAIT_US(1000);
         status = rp2350_sdio_command_u32(CMD8, 0x1AA, &reply, SDIO_FLAG_NO_LOGMSG); // SEND_IF_COND
         
         if (status == SDIO_OK && reply == 0x1AA)
@@ -271,6 +272,7 @@ bool SdioCard::begin(SdioConfig sdioConfig)
     if (reply != 0x1AA || status != SDIO_OK)
     {
         SDIO_DBGMSG("No response to CMD8 SEND_IF_COND", status, reply);
+        g_sdio_error = status;
         return false;
     }
 
