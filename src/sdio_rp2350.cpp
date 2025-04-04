@@ -90,6 +90,7 @@ static struct {
     } received_checksums[SDIO_MAX_BLOCKS_PER_REQ + 4];
 } g_sdio;
 
+static void rp2350_sdio_dma_irq();
 
 /*******************************************************
  * Checksum algorithms
@@ -595,6 +596,13 @@ static void sdio_verify_rx_checksums()
 // Returns SDIO_BUSY while transferring, SDIO_OK when done and error on failure.
 sdio_status_t rp2350_sdio_rx_poll(uint32_t *blocks_complete)
 {
+    if (scb_hw->icsr & M33_ICSR_VECTACTIVE_BITS)
+    {
+        // Verify that IRQ handler gets called even if we are in hardfault handler
+        // This is useful for emergency log saving after crash.
+        rp2350_sdio_dma_irq();
+    }
+
     if (blocks_complete)
     {
         *blocks_complete = g_sdio.blocks_done;
@@ -853,10 +861,10 @@ static void rp2350_sdio_dma_irq()
 // Check if transmission is complete
 sdio_status_t rp2350_sdio_tx_poll(uint32_t *blocks_complete)
 {
-    // SCB_ICSR_VECTACTIVE_Msk (0x1FFUL)
-    if (scb_hw->icsr & (0x1FFUL))
+    if (scb_hw->icsr & M33_ICSR_VECTACTIVE_BITS)
     {
-        // Verify that IRQ handler gets called even if we are in hardfault handler
+        // Verify that IRQ handler gets called even if we are in hardfault handler.
+        // This is useful for emergency log saving after crash.
         rp2350_sdio_dma_irq();
     }
 
