@@ -1,0 +1,13 @@
+{
+    "name": "SDIO_RP2350",
+    "version": "1.0.0",
+    "description": "High performance library for SD card access on RP2350 microcontroller.",
+    "repository": { "type": "git", "url": "https://github.com/rabbitholecomputing/RP2350_SDIO.git"},
+    "authors": [
+        { "name": "Petteri Aimonen", "email": "jpa@git.mail.kapsi.fi" },
+        { "name": "Rabbit Hole Computing", "email": "inquiries@rabbitholecomputing.com", "url": "https://www.rabbitholecomputing.com/" }
+    ],
+    "license": "MIT",
+    "frameworks": "*",
+    "platforms": "*"
+}
