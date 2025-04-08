@@ -34,6 +34,7 @@
 #include <hardware/pio.h>
 #include <hardware/dma.h>
 #include <hardware/gpio.h>
+#include <hardware/clocks.h>
 #include <hardware/structs/scb.h>
 #include <string.h>
 
@@ -59,6 +60,11 @@ static struct {
     uint32_t total_blocks; // Total number of blocks to transfer
     uint32_t blocks_checksumed; // Number of blocks that have had CRC calculated
     uint32_t checksum_errors; // Number of checksum errors detected
+
+    // Command and data clock rates
+    // Needed for timeout calculation
+    uint32_t cmd_clock_hz;
+    uint32_t data_clock_hz;
 
     // Variables for block writes
     uint64_t next_wr_block_checksum;
@@ -320,11 +326,18 @@ sdio_status_t rp2350_sdio_command(uint8_t command, uint32_t arg, void *response,
     pio_sm_put(SDIO_PIO, SDIO_SM, word0);
     pio_sm_put(SDIO_PIO, SDIO_SM, word1);
 
+    // Calculate the timeout, taking into account the clock rate
+    uint32_t timeout = SDIO_CMD_TIMEOUT_US;
+    if (g_sdio.cmd_clock_hz > 0)
+    {
+        timeout += (uint32_t)(48 + response_bits) * 1000000 / g_sdio.cmd_clock_hz;
+    }
+
     // Wait for response
     uint32_t start = SDIO_TIME_US();
     while (dma_channel_is_busy(SDIO_DMACH_A))
     {
-        if (SDIO_ELAPSED_US(start) > SDIO_CMD_TIMEOUT_US)
+        if (SDIO_ELAPSED_US(start) > timeout)
         {
             if (!(flags & SDIO_FLAG_NO_LOGMSG))
             {
@@ -534,9 +547,11 @@ static void sdio_update_rx_blocks_done()
         // reading the FIFO. But normally the checksum has already
         // been received during the IRQ latency.
         uint32_t start = SDIO_TIME_US();
+        int timeout = SDIO_CMD_TIMEOUT_US;
+        if (g_sdio.data_clock_hz > 0) timeout += 20 * 1000000 / g_sdio.data_clock_hz;
         while (pio_sm_get_rx_fifo_level(SDIO_PIO, SDIO_SM) < 3)
         {
-            if (SDIO_ELAPSED_US(start) > SDIO_CMD_TIMEOUT_US)
+            if (SDIO_ELAPSED_US(start) > timeout)
             {
                 SDIO_ERRMSG("Checksum reception timeout", pio_sm_get_rx_fifo_level(SDIO_PIO, SDIO_SM), 0);
                 g_sdio.checksum_errors++;
@@ -963,6 +978,17 @@ static uint32_t clamp(uint32_t x, uint32_t min, uint32_t max)
     return x;
 }
 
+static uint32_t divide_clockrate(uint32_t sys_clk, uint32_t target_hz)
+{
+    // Round down the divider, and if that results in too high clock rate,
+    // increase the divider by one.
+    uint32_t divider = sys_clk / target_hz;
+    uint32_t actual_hz = sys_clk / divider;
+    int exceed_percent = ((int64_t)actual_hz - (int64_t)target_hz) * 100 / target_hz;
+    if (exceed_percent > SDIO_MAX_CLOCK_RATE_EXCEED_PERCENT) divider++;
+
+    return divider;
+}
 
 rp2350_sdio_timing_t rp2350_sdio_get_timing(rp2350_sdio_mode_t mode)
 {
@@ -970,44 +996,44 @@ rp2350_sdio_timing_t rp2350_sdio_get_timing(rp2350_sdio_mode_t mode)
     result.mode = mode;
 
     uint32_t sys_clk = clock_get_hz(clk_sys);
-    uint32_t target_hz = 0;
+    uint32_t data_hz = 0;
     
     if (mode == SDIO_INITIALIZE)
     {
-        target_hz = 400000;
+        data_hz = 300000;
     }
     else if (mode == SDIO_MMC)
     {
-        target_hz = 20000000;
+        data_hz = 20000000;
     }
     else if (mode == SDIO_STANDARD)
     {
-        target_hz = 25000000;
+        data_hz = 25000000;
     }
     else if (mode == SDIO_HIGHSPEED)
     {
-        target_hz = 50000000;
+        data_hz = 50000000;
         result.use_high_speed = true;
     }
     else if (mode == SDIO_HIGHSPEED_OVERCLOCK)
     {
-        target_hz = 75000000;
+        data_hz = 75000000;
         result.use_high_speed = true;
     }
 
-    uint32_t divider = sys_clk / target_hz;
-    uint32_t actual_hz = sys_clk / divider;
-    if (actual_hz > target_hz * 11 / 10) divider++; // Rounding error exceeded 10%
+    uint32_t cmd_hz = (data_hz < SDIO_MAX_CMD_CLOCK_RATE_HZ) ? data_hz : SDIO_MAX_CMD_CLOCK_RATE_HZ;
+    int data_divider = divide_clockrate(sys_clk, data_hz);
+    int cmd_divider = divide_clockrate(sys_clk, cmd_hz);
 
-    result.cmd_clk_divider = clamp(divider, SDIO_MIN_CMD_CLK_DIVIDER, SDIO_MAX_CMD_CLK_DIVIDER);
+    result.cmd_clk_divider = clamp(cmd_divider, SDIO_MIN_CMD_CLK_DIVIDER, SDIO_MAX_CMD_CLK_DIVIDER);
 
     if (result.use_high_speed)
     {
-        result.data_clk_divider = clamp(divider, SDIO_MIN_HS_DATA_CLK_DIVIDER, SDIO_MAX_HS_DATA_CLK_DIVIDER);
+        result.data_clk_divider = clamp(data_divider, SDIO_MIN_HS_DATA_CLK_DIVIDER, SDIO_MAX_HS_DATA_CLK_DIVIDER);
     }
     else
     {
-        result.data_clk_divider = clamp(divider, SDIO_MIN_DATA_CLK_DIVIDER, SDIO_MAX_DATA_CLK_DIVIDER);
+        result.data_clk_divider = clamp(data_divider, SDIO_MIN_DATA_CLK_DIVIDER, SDIO_MAX_DATA_CLK_DIVIDER);
     }
     return result;
 }
@@ -1068,6 +1094,8 @@ void rp2350_sdio_init(rp2350_sdio_timing_t timing)
         sm_config_set_in_shift(&cfg, false, true, 32);
         sm_config_set_clkdiv_int_frac(&cfg, prescaler, 0);
         g_sdio.pio_cfg.sdio_cmd = cfg;
+
+        g_sdio.cmd_clock_hz = clock_get_hz(clk_sys) / prescaler / (delay + SDIO_MIN_CMD_CLK_DIVIDER);
     }
 
     if (!timing.use_high_speed)
@@ -1099,6 +1127,8 @@ void rp2350_sdio_init(rp2350_sdio_timing_t timing)
         sm_config_set_sideset_pins(&cfg, SDIO_CLK);
         sm_config_set_clkdiv_int_frac(&cfg, prescaler, 0);
         g_sdio.pio_cfg.data_tx = cfg;
+
+        g_sdio.data_clock_hz = clock_get_hz(clk_sys) / prescaler / (delay + SDIO_MIN_DATA_CLK_DIVIDER);
     }
     else if (timing.data_clk_divider >= 3)
     {
@@ -1124,6 +1154,8 @@ void rp2350_sdio_init(rp2350_sdio_timing_t timing)
         sm_config_set_jmp_pin(&cfg, SDIO_D0);
         sm_config_set_sideset_pins(&cfg, SDIO_CLK);
         g_sdio.pio_cfg.data_tx = cfg;
+
+        g_sdio.data_clock_hz = clock_get_hz(clk_sys) / (delay0 + 3);
     }
     else
     {
@@ -1146,6 +1178,8 @@ void rp2350_sdio_init(rp2350_sdio_timing_t timing)
         sm_config_set_jmp_pin(&cfg, SDIO_D0);
         sm_config_set_sideset_pins(&cfg, SDIO_CLK);
         g_sdio.pio_cfg.data_tx = cfg;
+
+        g_sdio.data_clock_hz = clock_get_hz(clk_sys) / 2;
     }
 
     // Disable SDIO pins input synchronizer.

@@ -249,6 +249,7 @@ bool SdioCard::begin(SdioConfig sdioConfig)
     g_sdio_sector_count = 0;
     g_sdio_error = SDIO_OK;
     g_sdio_error_line = 0;
+    g_sdio_clk_hz = 0;
 
     // Initialize at 400 kHz clock speed
     rp2350_sdio_init(rp2350_sdio_get_timing(SDIO_INITIALIZE));

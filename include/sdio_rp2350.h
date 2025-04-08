@@ -96,8 +96,9 @@ enum sdio_status_t {
 #endif
 
 // Timeout for executing SDIO commands
+// The command and response time based on clock rate is added to this.
 #ifndef SDIO_CMD_TIMEOUT_US
-#define SDIO_CMD_TIMEOUT_US 2000
+#define SDIO_CMD_TIMEOUT_US 50
 #endif
 
 // Timeout for read/write transfers, total
@@ -154,6 +155,19 @@ enum sdio_status_t {
 #define SDIO_DEFAULT_SPEED SDIO_HIGHSPEED
 #endif
 
+// If the target communication frequency cannot achieved exactly,
+// we can choose between smaller or higher divider. This specifies
+// how much we can exceed the target clock rate
+#ifndef SDIO_MAX_CLOCK_RATE_EXCEED_PERCENT
+#define SDIO_MAX_CLOCK_RATE_EXCEED_PERCENT 5
+#endif
+
+// Reliability is better if we issue commands at max 25 MHz clock
+// rate even when data transfer is faster.
+#ifndef SDIO_MAX_CMD_CLOCK_RATE_HZ
+#define SDIO_MAX_CMD_CLOCK_RATE_HZ 25000000
+#endif
+
 #ifndef SDIO_CARD_OCR_MODE
 // See 4.2.3.1 Initialization Command (ACMD41) in SD specification
 // Default value sets high capacity, maximum performance, 3.3V supply voltage
@@ -204,7 +218,7 @@ sdio_status_t rp2350_sdio_stop();
 
 // This should be kept in order by increasing speed
 typedef enum {
-    SDIO_INITIALIZE             = 0, // Initialization 400 kHz
+    SDIO_INITIALIZE             = 0, // Initialization 300 kHz
     SDIO_MMC                    = 1, // Old MMC cards, 20 MHz
     SDIO_STANDARD               = 2, // Standard 25 MHz
     SDIO_HIGHSPEED              = 3, // High-speed 50 MHz
