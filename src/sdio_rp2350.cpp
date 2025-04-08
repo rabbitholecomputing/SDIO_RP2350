@@ -906,18 +906,30 @@ sdio_status_t rp2350_sdio_tx_poll(uint32_t *blocks_complete)
 }
 
 // Force everything to idle state
+// This requires careful sequencing to cleanly abort any running data transfers.
 sdio_status_t rp2350_sdio_stop()
 {
-    dma_irqn_set_channel_enabled(SDIO_DMAIRQ_IDX, SDIO_DMACH_B, false);
-    dma_channel_abort(SDIO_DMACH_A);
-    dma_channel_abort(SDIO_DMACH_B);
+    // First disable DMA interrupt handlers
+    uint32_t channel_mask = (1 << SDIO_DMACH_A) | (1 << SDIO_DMACH_B);
+    dma_irqn_set_channel_mask_enabled(SDIO_DMAIRQ_IDX, channel_mask, false);
+
+    // Then stop the PIO state machine
     sdio_enable_clk(false);
     pio_sm_set_enabled(SDIO_PIO, SDIO_SM, false);
     pio_sm_set_consecutive_pindirs(SDIO_PIO, SDIO_SM, SDIO_D0, 4, false);
     
+    // The DMA channels chain to each other, so they must be aborted simultaneously.
+    // To ensure both are stopped, they are aborted twice.
+    dma_hw->abort = channel_mask;
+    while (dma_hw->abort);
+    dma_hw->abort = channel_mask;
+    while (dma_hw->abort);
+
     // Re-enable the command state machine
     // This will give continuous clock for the card to use for its own tasks
     pio_sm_init(SDIO_PIO, SDIO_SM, g_sdio.pio_offset.sdio_cmd, &g_sdio.pio_cfg.sdio_cmd);
+    pio_sm_clear_fifos(SDIO_PIO, SDIO_SM);
+    pio_sm_exec(SDIO_PIO, SDIO_SM, pio_encode_mov(pio_isr, pio_null)); // Make sure ISR is empty
     pio_sm_set_consecutive_pindirs(SDIO_PIO, SDIO_SM, SDIO_CLK, 1, true);
     pio_sm_set_consecutive_pindirs(SDIO_PIO, SDIO_SM, SDIO_CMD, 1, false);
     sdio_enable_clk(true);

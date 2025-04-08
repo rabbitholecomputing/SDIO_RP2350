@@ -511,6 +511,7 @@ static void prefetchProcess(SdioCard *card)
         SDIO_DBGMSG("Prefetch transfer done",
             g_sdio_prefetch.sector + g_sdio_prefetch.prefetch_start,
             g_sdio_prefetch.prefetch_count);
+        g_sdio_prefetch.writecnt = g_sdio_prefetch.prefetch_start + g_sdio_prefetch.prefetch_count;
         g_sdio_prefetch.prefetch_start = 0;
         g_sdio_prefetch.prefetch_count = 0;
     }
@@ -579,6 +580,18 @@ static bool prefetchSeek(SdioCard *card, uint32_t sector)
 {
     prefetchProcess(card);
 
+    if (sector >= g_sdio_prefetch.sector + g_sdio_prefetch.writecnt &&
+        sector < g_sdio_prefetch.sector + g_sdio_prefetch.prefetch_start + g_sdio_prefetch.prefetch_count &&
+        sector < g_sdio_prefetch.sector + g_sdio_prefetch.writecnt + 3)
+    {
+        // Sector is part of currently running prefetch request and will be available
+        // soon, wait for it.
+        while (sector >= g_sdio_prefetch.sector + g_sdio_prefetch.writecnt)
+        {
+            prefetchProcess(card);
+        }
+    }
+
     if (sector < g_sdio_prefetch.sector + g_sdio_prefetch.readcnt)
     {
         SDIO_DBGMSG("Prefetch miss under", sector, g_sdio_prefetch.sector + g_sdio_prefetch.readcnt);
@@ -626,12 +639,12 @@ bool SdioCard::readStart(uint32_t sector)
         }
     }
 
-    prefetchClear();
-
     if (m_curState != IDLE_STATE)
     {
         stopTransmission(true);
     }
+
+    prefetchClear();
 
     // Cards up to 2GB use byte addressing, SDHC cards use sector addressing
     uint32_t address = (type() == SD_CARD_TYPE_SDHC) ? sector : (sector * 512);
