@@ -102,9 +102,19 @@ enum sdio_status_t {
 #define SDIO_TRANSFER_TIMEOUT_US (1000 * 1000)
 #endif
 
-// Tiemout for card initialization
+// Timeout for card initialization
 #ifndef SDIO_INIT_TIMEOUT_US
 #define SDIO_INIT_TIMEOUT_US (1000 * 1000)
+#endif
+
+// On 48-pin devices, IOBASE determines which pins
+// the PIO block can access.
+#ifndef SDIO_PIO_IOBASE
+# if SDIO_CLK > 31
+#  define SDIO_PIO_IOBASE 16
+# else
+#  define SDIO_PIO_IOBASE 0
+# endif
 #endif
 
 // Enable the definition of SdFat library SdioCard class

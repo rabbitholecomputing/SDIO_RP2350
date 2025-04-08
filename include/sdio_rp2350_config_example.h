@@ -61,8 +61,3 @@
 #define SDIO_D1  37
 #define SDIO_D2  38
 #define SDIO_D3  39
-
-#if SDIO_CLK > 31
-#define SDIO_PIO_IOBASE 16
-#endif
-
