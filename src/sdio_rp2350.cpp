@@ -327,10 +327,11 @@ sdio_status_t rp2350_sdio_command(uint8_t command, uint32_t arg, void *response,
     pio_sm_put(SDIO_PIO, SDIO_SM, word1);
 
     // Calculate the timeout, taking into account the clock rate
+    // Command takes 48 bits, response N bits and add 64 bit times for card latency.
     uint32_t timeout = SDIO_CMD_TIMEOUT_US;
     if (g_sdio.cmd_clock_hz > 0)
     {
-        timeout += (uint32_t)(48 + response_bits) * 1000000 / g_sdio.cmd_clock_hz;
+        timeout += (uint32_t)(64 + 48 + response_bits) * 1000000 / g_sdio.cmd_clock_hz;
     }
 
     // Wait for response
@@ -341,7 +342,8 @@ sdio_status_t rp2350_sdio_command(uint8_t command, uint32_t arg, void *response,
         {
             if (!(flags & SDIO_FLAG_NO_LOGMSG))
             {
-                SDIO_ERRMSG("Timeout waiting for command response", command, SDIO_PIO->flevel);
+                SDIO_ERRMSG("Timeout waiting for command response", command,
+                    (SDIO_PIO->flevel) << 16 | (dma_hw->ch[SDIO_DMACH_A].transfer_count));
             }
 
             // Reset the state machine program
