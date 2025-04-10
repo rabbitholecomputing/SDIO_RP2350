@@ -121,6 +121,14 @@ enum sdio_status_t {
 # endif
 #endif
 
+#ifndef SDIO_GPIO_SLEW
+#define SDIO_GPIO_SLEW GPIO_SLEW_RATE_FAST
+#endif
+
+#ifndef SDIO_GPIO_DRIVE
+#define SDIO_GPIO_DRIVE GPIO_DRIVE_STRENGTH_8MA
+#endif
+
 // Enable the definition of SdFat library SdioCard class
 #ifndef SDIO_USE_SDFAT
 #define SDIO_USE_SDFAT 1

@@ -1207,8 +1207,8 @@ void rp2350_sdio_init(rp2350_sdio_timing_t timing)
     for (int i = 0; i < 6; i++)
     {
         gpio_set_function(pins[i], SDIO_GPIO_FUNC);
-        gpio_set_slew_rate(pins[i], GPIO_SLEW_RATE_FAST);
-        gpio_set_drive_strength(pins[i], GPIO_DRIVE_STRENGTH_8MA);
+        gpio_set_slew_rate(pins[i], SDIO_GPIO_SLEW);
+        gpio_set_drive_strength(pins[i], SDIO_GPIO_DRIVE);
     }
     
     // Set up IRQ handler when DMA completes.
