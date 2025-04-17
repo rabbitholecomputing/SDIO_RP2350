@@ -340,6 +340,11 @@ sdio_status_t rp2350_sdio_command(uint8_t command, uint32_t arg, void *response,
     {
         if (SDIO_ELAPSED_US(start) > timeout)
         {
+            if (!dma_channel_is_busy(SDIO_DMACH_A))
+            {
+                break; // Busy condition cleared in between (delay due to interrupt handler?)
+            }
+
             if (!(flags & SDIO_FLAG_NO_LOGMSG))
             {
                 SDIO_ERRMSG("Timeout waiting for command response", command,
