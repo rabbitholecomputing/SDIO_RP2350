@@ -462,7 +462,7 @@ bool SdioCard::readOCR(uint32_t* ocr)
 static void prefetchClear() {}
 static bool prefetchIsEmpty() { return true; }
 static bool prefetchBusy(SdioCard *card) { return false; }
-static void prefetchProcess(SdioCard *card) {}
+static bool prefetchProcess(SdioCard *card) { return false; }
 static uint32_t prefetchStart(SdioCard *card, uint32_t sector) { return sector; }
 static bool prefetchSeek(SdioCard *card, uint32_t sector) { return false; }
 static void prefetchRead(SdioCard *card, uint8_t *dst)
@@ -488,12 +488,12 @@ static bool prefetchBusy(SdioCard *card)
 }
 
 // Process any received prefetch blocks
-static void prefetchProcess(SdioCard *card)
+static bool prefetchProcess(SdioCard *card)
 {
     if (!prefetchBusy(card))
     {
         // Nothing in progress
-        return;
+        return true;
     }
 
     uint32_t blocks_done;
@@ -504,7 +504,7 @@ static void prefetchProcess(SdioCard *card)
     if (g_sdio_error == SDIO_BUSY)
     {
         // Still transferring
-        return;
+        return true;
     }
     else if (g_sdio_error == SDIO_OK)
     {
@@ -514,6 +514,7 @@ static void prefetchProcess(SdioCard *card)
         g_sdio_prefetch.writecnt = g_sdio_prefetch.prefetch_start + g_sdio_prefetch.prefetch_count;
         g_sdio_prefetch.prefetch_start = 0;
         g_sdio_prefetch.prefetch_count = 0;
+        return true;
     }
     else
     {
@@ -522,6 +523,7 @@ static void prefetchProcess(SdioCard *card)
             g_sdio_prefetch.sector + g_sdio_prefetch.prefetch_start,
             g_sdio_prefetch.prefetch_count);
         card->stopTransmission(true);
+        return false;
     }
 }
 
@@ -588,7 +590,7 @@ static bool prefetchSeek(SdioCard *card, uint32_t sector)
         // soon, wait for it.
         while (sector >= g_sdio_prefetch.sector + g_sdio_prefetch.writecnt)
         {
-            prefetchProcess(card);
+            if (!prefetchProcess(card)) return false;
         }
     }
 
