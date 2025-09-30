@@ -341,14 +341,20 @@ bool SdioCard::begin(SdioConfig sdioConfig)
         return false;
     }
     
-    // Store the expected data
-    uint32_t words_per_block = SDIO_BLOCK_SIZE / 4;
-    uint32_t first = g_sdio_tmp_buf[0];
-    uint32_t last = g_sdio_tmp_buf[words_per_block - 1];
-    SDIO_DBGMSG("Reference data", first, last);
-
     rp2350_sdio_mode_t mode = SDIO_DEFAULT_SPEED;
     rp2350_sdio_timing_t timing;
+
+    if ((int)mode >= SDIO_HIGHSPEED)
+    {
+        // Check SD card class and do not attempt high-speed for old cards
+        // SD card standard requires high speed mode only for class >= 10
+        sds_t sds = {0};
+        if (readSDS(&sds) && sds.speedClass() < 10)
+        {
+            SDIO_DBGMSG("Using standard speed for card class < 10", sds.speedClass(), 0);
+            mode = SDIO_STANDARD;
+        }
+    }
 
     while ((int)mode > SDIO_INITIALIZE)
     {
@@ -356,8 +362,22 @@ bool SdioCard::begin(SdioConfig sdioConfig)
         timing = rp2350_sdio_get_timing(mode);
         
         // Configure card mode with CMD6
+        // Speed is selected by function select group 1 (lowest 4 bits):
+        // 0: SDR12 (25 MHz, 3.3 V)
+        // 1: SDR25 (50 MHz, 3.3 V)
+        // 2: SDR50 (100 MHz, 1.8 V)
+        // 3: SDR104 (208 MHz, 1.8 V)
+        // 4: DDR50 (50 MHz, 1.8 V)
         uint32_t arg = timing.use_high_speed ? 0x80FFFF01 : 0x80FFFF00;
-        cardCMD6(arg, (uint8_t*)&g_sdio_tmp_buf);
+        uint8_t *status_buf = (uint8_t*)&g_sdio_tmp_buf;
+        bool ok = cardCMD6(arg, status_buf);
+
+        if (!ok && (int)mode > SDIO_STANDARD)
+        {
+            SDIO_DBGMSG("Skipping mode after failed CMD6", mode, 0);
+            mode = SDIO_STANDARD;
+            continue;
+        }
         
         // Apply new clock rate
         rp2350_sdio_init(timing);
@@ -887,7 +907,6 @@ bool SdioCard::cardCMD6(uint32_t arg, uint8_t* status) {
     SDIO_WAIT_US(1000); // Wait for function switch to complete
 
     SDIO_DBGMSG("CMD6 response status", reply, status[16]);
-    uint32_t new_group1_mode = g_sdio_tmp_buf[16] & 0x0F;
 
     if (g_sdio_error != SDIO_OK)
     {

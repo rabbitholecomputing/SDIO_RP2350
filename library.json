@@ -1,6 +1,6 @@
 {
     "name": "SDIO_RP2350",
-    "version": "1.0.0",
+    "version": "1.0.4",
     "description": "High performance library for SD card access on RP2350 microcontroller.",
     "repository": { "type": "git", "url": "https://github.com/rabbitholecomputing/RP2350_SDIO.git"},
     "authors": [
