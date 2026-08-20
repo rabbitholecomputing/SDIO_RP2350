@@ -592,7 +592,7 @@ sdio_status_t rp2350_sdio_rx_start(uint8_t *buffer, uint32_t num_blocks, uint32_
     {
         // Create DMA block descriptors to automatically start next block when previous
         // completes.
-        for (int i = 0; i < num_blocks; i++)
+        for (uint32_t i = 0; i < num_blocks; i++)
         {
             if (i > 0)
             {
@@ -660,7 +660,7 @@ static void sdio_update_rx_blocks_done()
         // reading the FIFO. But normally the checksum has already
         // been received during the IRQ latency.
         uint32_t start = SDIO_TIME_US();
-        int timeout = SDIO_CMD_TIMEOUT_US;
+        uint32_t timeout = SDIO_CMD_TIMEOUT_US;
         if (g_sdio.data_clock_hz > 0) timeout += 20 * 1000000 / g_sdio.data_clock_hz;
         while (pio_sm_get_rx_fifo_level(SDIO_PIO, SDIO_SM) < 3)
         {
