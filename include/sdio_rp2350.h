@@ -44,7 +44,7 @@
 extern "C" {
 #endif
 
-enum sdio_status_t {
+typedef enum {
     SDIO_OK = 0,
     SDIO_BUSY = 1,
     SDIO_ERR_RESPONSE_TIMEOUT = 2, // Timed out waiting for response from card
@@ -56,7 +56,7 @@ enum sdio_status_t {
     SDIO_ERR_WRITE_FAIL = 8,       // Card reports write failure
     SDIO_ERR_STOP_TIMEOUT = 9,     // Timeout waiting for card to be idle
     SDIO_ERR_INVALID_PARAM = 10,   // Invalid parameters to function
-};
+} sdio_status_t;
 
 // SDIO driver can optionally log debug, error and critical messages.
 // To enable this, edit sdio_rp2350_config.h
