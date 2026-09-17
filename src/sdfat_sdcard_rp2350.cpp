@@ -1,5 +1,6 @@
 /** 
  * SDIO_RP2350 - Copyright (c) 2022-2025 Rabbit Hole Computing™
+ * SDFat - Copyright (c) 2011-2025 Bill Greiman
  * 
  * MIT License
  *
@@ -921,10 +922,72 @@ bool SdioCard::writeStop()
     return stopTransmission(true);
 }
 
+#ifndef SDIO_ERASE_TIMEOUT_US
+// 30s was too short in practice (2026-09-14 hw test): a ~300MB chunk on a
+// real card timed out with no other error logged, meaning the card was
+// still legitimately busy erasing. 120s is a generous safety-net ceiling
+// against a truly stuck card, not the expected normal per-chunk duration
+// -- actual duration is bounded instead by the caller's chunk size
+// (see ERASE_CHUNK_CAP_SECTORS in ZuluSCSI_usb_console_erase.cpp).
+#define SDIO_ERASE_TIMEOUT_US (120 * 1000 * 1000)
+#endif
+
 bool SdioCard::erase(uint32_t firstSector, uint32_t lastSector)
 {
-    SDIO_ERRMSG("SdioCard::erase() not implemented", 0, 0);
-    return false;
+    // Force the bus to a known-idle state before starting the erase
+    // command sequence. isBusy() (used below to poll for erase completion)
+    // has a side effect: if it's called while m_curState isn't IDLE_STATE,
+    // it issues CMD12 (STOP_TRANSMISSION) as a side effect. That's the
+    // correct way to end a READ/WRITE_MULTIPLE_BLOCK transfer, but CMD12
+    // has no defined meaning while the card is busy from CMD38 (ERASE) --
+    // if a stray multi-block read/write from earlier (e.g. scanning image
+    // files at boot) left m_curState non-idle, the first isBusy() call
+    // inside this function's busy-wait loop would inject CMD12 in the
+    // middle of the card's internal erase, which could plausibly leave it
+    // stuck signaling busy indefinitely. Doing this here, before CMD32,
+    // guarantees m_curState is already IDLE_STATE for the entire busy-wait
+    // below, so isBusy()'s CMD12 branch can never fire mid-erase.
+
+    if (m_curState != IDLE_STATE)
+    {
+        stopTransmission(true);
+    }
+
+    if (!g_sdio_csd.eraseSingleBlock()) {
+        // erase size mask
+        uint8_t m = g_sdio_csd.eraseSize() - 1;
+        if ((firstSector & m) != 0 || ((lastSector + 1) & m) != 0) {
+            // error card can't erase specified area
+            SDIO_ERRMSG("Can't erase specified area", firstSector, lastSector);
+            return false;
+        }
+    }
+
+    // Cards up to 2GB use byte addressing, SDHC cards use sector addressing
+    uint32_t firstAddr = (type() == SD_CARD_TYPE_SDHC) ? firstSector : (firstSector * 512);
+    uint32_t lastAddr = (type() == SD_CARD_TYPE_SDHC) ? lastSector : (lastSector * 512);
+
+    uint32_t reply;
+    if (!checkReturnOk(rp2350_sdio_command_u32(CMD32, firstAddr, &reply, 0)) || // SET_ERASE_START
+        !checkReturnOk(rp2350_sdio_command_u32(CMD33, lastAddr, &reply, 0)) || // SET_ERASE_END
+        !checkReturnOk(rp2350_sdio_command_u32(CMD38, 0, &reply, 0))) // ERASE
+    {
+        SDIO_ERRMSG("SdioCard::erase() command failed", firstSector, lastSector);
+        return false;
+    }
+
+    uint32_t start = SDIO_TIME_US();
+    while (isBusy())
+    {
+        platform_reset_watchdog();
+        if (SDIO_ELAPSED_US(start) > SDIO_ERASE_TIMEOUT_US)
+        {
+            SDIO_ERRMSG("SdioCard::erase() timed out", firstSector, lastSector);
+            return false;
+        }
+    }
+
+    return true;
 }
 
 bool SdioCard::cardCMD6(uint32_t arg, uint8_t* status) {
