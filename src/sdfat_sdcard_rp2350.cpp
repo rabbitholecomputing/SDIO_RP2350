@@ -1034,9 +1034,32 @@ bool SdioCard::cardCMD6(uint32_t arg, uint8_t* status) {
     }
 }
 
-bool SdioCard::readSCR(scr_t* scr) {
-    SDIO_ERRMSG("SdioCard::readSCR() not implemented", 0, 0);
-    return false;
+
+bool SdioCard::readSCR(scr_t* scr)
+{
+    if (m_curState != IDLE_STATE)
+    {
+        stopTransmission(false);
+    }
+
+    uint32_t reply;
+    if (!checkReturnOk(rp2350_sdio_command_u32(CMD55, g_sdio_rca, &reply, 0)) ||
+        !checkReturnOk(rp2350_sdio_command_u32(ACMD51, 0, &reply, SDIO_FLAG_STOP_CLK)))
+    {
+        rp2350_sdio_stop();
+        return false;
+    }
+
+    rp2350_sdio_rx_start((uint8_t*)g_sdio_tmp_buf, 1, 8);
+
+    do {
+        g_sdio_error = rp2350_sdio_rx_poll(NULL);
+    } while (g_sdio_error == SDIO_BUSY);
+
+    rp2350_sdio_stop();
+
+    memcpy(scr, g_sdio_tmp_buf, sizeof(*scr));
+    return true;
 }
 
 /* Writing and reading, with progress callback */
