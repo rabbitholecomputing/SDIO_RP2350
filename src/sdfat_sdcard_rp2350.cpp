@@ -1273,8 +1273,12 @@ bool SdioCard::readSectors(uint32_t sector, uint8_t* dst, size_t n)
             }
             else
             {
-                SDIO_ERRMSG("readSectors multi-block failed", sector, g_sdio_error);
+                // Capture the status before stopTransmission() overwrites g_sdio_error
+                sdio_status_t err = g_sdio_error;
+                SDIO_ERRMSG("readSectors multi-block failed", sector, err);
                 stopTransmission(true);
+                // Count CRC errors even if the sector-by-sector retry below succeeds
+                sdiocard_error_monitor(this, err);
                 // Fall through to retry sector-by-sector
             }
         }
