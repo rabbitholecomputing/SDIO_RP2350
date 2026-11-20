@@ -261,6 +261,15 @@ rp2350_sdio_timing_t rp2350_sdio_get_timing(rp2350_sdio_mode_t mode);
 // switch its mode.
 void rp2350_sdio_init(rp2350_sdio_timing_t timing);
 
+// Optional callback that sets the maximum speed used when the SD card is initialized.
+// When set, card initialization tries the returned mode instead of SDIO_DEFAULT_SPEED.
+// The speed is still lowered automatically for old cards, after CRC errors or if
+// communication fails at the returned speed.
+// Set to NULL to restore the default speed selection.
+typedef rp2350_sdio_mode_t (*sd_max_speed_callback_t)(void);
+void rp2350_sdio_set_max_speed_callback(sd_max_speed_callback_t func);
+sd_max_speed_callback_t rp2350_sdio_get_max_speed_callback(void);
+
 #ifdef SDIO_USE_SDFAT
 // Optional callback can be used to do co-operative multitasking while SdFat is reading data.
 // When a transfer to/from buffer is detected, callback gets called during transfer.
