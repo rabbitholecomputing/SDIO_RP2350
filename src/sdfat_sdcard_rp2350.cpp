@@ -370,6 +370,21 @@ bool SdioCard::begin(SdioConfig sdioConfig)
     rp2350_sdio_mode_t mode = SDIO_DEFAULT_SPEED;
     rp2350_sdio_timing_t timing;
 
+    sd_max_speed_callback_t max_speed_callback = rp2350_sdio_get_max_speed_callback();
+    if (max_speed_callback != NULL)
+    {
+        rp2350_sdio_mode_t requested = max_speed_callback();
+        if ((int)requested >= SDIO_MMC && (int)requested <= SDIO_HIGHSPEED_OVERCLOCK)
+        {
+            SDIO_DBGMSG("SDIO max speed set by callback", (int)requested, 0);
+            mode = requested;
+        }
+        else
+        {
+            SDIO_ERRMSG("Invalid SDIO mode from max speed callback, using default", (int)requested, (int)SDIO_DEFAULT_SPEED);
+        }
+    }
+
     if ((int)mode >= SDIO_HIGHSPEED)
     {
         // Check SD card class and do not attempt high-speed for old cards

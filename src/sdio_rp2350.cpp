@@ -1231,6 +1231,18 @@ rp2350_sdio_timing_t rp2350_sdio_get_timing(rp2350_sdio_mode_t mode)
     return result;
 }
 
+static sd_max_speed_callback_t g_sdio_max_speed_callback = NULL;
+
+void rp2350_sdio_set_max_speed_callback(sd_max_speed_callback_t func)
+{
+    g_sdio_max_speed_callback = func;
+}
+
+sd_max_speed_callback_t rp2350_sdio_get_max_speed_callback(void)
+{
+    return g_sdio_max_speed_callback;
+}
+
 void rp2350_sdio_init(rp2350_sdio_timing_t timing)
 {
     SDIO_DBGMSG("SDIO init", timing.cmd_clk_divider, timing.data_clk_divider);
