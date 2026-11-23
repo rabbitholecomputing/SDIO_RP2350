@@ -1118,6 +1118,7 @@ bool SdioCard::readSCR(scr_t* scr)
 
 bool SdioCard::writeSector(uint32_t sector, const uint8_t* src)
 {
+    const uint8_t *real_src = src;
     if (((uint32_t)src & 3) != 0)
     {
         // Buffer is not aligned, need to memcpy() the data to a temporary buffer.
@@ -1136,6 +1137,14 @@ bool SdioCard::writeSector(uint32_t sector, const uint8_t* src)
         for (int i = 0; i < SDIO_MAX_RETRYCOUNT; i++)
         {
             SDIO_DBGMSG("Retrying write_single_sector", sector, i);
+
+            if (src != real_src)
+            {
+                // Copy the data again, because g_sdio_tmp_buf gets overwritten
+                // if the card is reinitialized after CRC errors.
+                memcpy(g_sdio_tmp_buf, real_src, sizeof(g_sdio_tmp_buf));
+            }
+
             if (write_single_sector(this, sector, src))
             {
                 success = true;
