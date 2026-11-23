@@ -166,12 +166,12 @@ typedef enum {
 #define SDIO_DEFAULT_SPEED SDIO_HIGHSPEED
 #endif
 
-// Number of CRC errors before automatic fallback to slower clockspeed
+// Number of CRC errors before automatically reducing the speed to the next slower mode
 #ifndef SDIO_FALLBACK_CRC_ERROR_COUNT
 #define SDIO_FALLBACK_CRC_ERROR_COUNT 3
 #endif
 
-// Mode to fall back to after multiple CRC errors
+// Slowest mode that the speed is reduced to after multiple CRC errors
 #ifndef SDIO_FALLBACK_MODE
 #define SDIO_FALLBACK_MODE SDIO_STANDARD
 #endif

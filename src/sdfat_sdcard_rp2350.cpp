@@ -121,8 +121,24 @@ static void sdiocard_error_monitor(SdioCard *card, sdio_status_t error)
         if (g_sdio_crc_failure_count > SDIO_FALLBACK_CRC_ERROR_COUNT &&
             (int)g_sdio_active_clk_mode > SDIO_FALLBACK_MODE)
         {
-            SDIO_CRITMSG("Multiple SDIO CRC errors, reducing clock to 25 MHz", g_sdio_crc_failure_count, g_sdio_active_clk_mode);
-            g_sdio_max_clk_mode = SDIO_FALLBACK_MODE;
+            // Reduce the speed by one mode at a time. Initialization clears the error count, so
+            // the speed is reduced further only if there are more errors at the new speed.
+            rp2350_sdio_mode_t mode = (rp2350_sdio_mode_t)((int)g_sdio_active_clk_mode - 1);
+
+            if (mode == SDIO_HIGHSPEED)
+            {
+                SDIO_CRITMSG("Multiple SDIO CRC errors, reducing clock to 50 MHz", g_sdio_crc_failure_count, g_sdio_active_clk_mode);
+            }
+            else if (mode == SDIO_STANDARD)
+            {
+                SDIO_CRITMSG("Multiple SDIO CRC errors, reducing clock to 25 MHz", g_sdio_crc_failure_count, g_sdio_active_clk_mode);
+            }
+            else
+            {
+                SDIO_CRITMSG("Multiple SDIO CRC errors, reducing clock to 20 MHz", g_sdio_crc_failure_count, g_sdio_active_clk_mode);
+            }
+
+            g_sdio_max_clk_mode = mode;
 
             SdioConfig defcfg;
             card->begin(defcfg);
