@@ -1241,6 +1241,16 @@ bool SdioCard::writeSectors(uint32_t sector, const uint8_t* src, size_t n)
 
 bool SdioCard::readSector(uint32_t sector, uint8_t* dst)
 {
+    if (sector >= g_sdio_sector_count)
+    {
+        // The card does not send any data for these, so the read and its retry would
+        // fail only after SDIO_TRANSFER_TIMEOUT_US. This happens for example when SdFat
+        // looks for a partition table on a card that does not have one.
+        SDIO_ERRMSG("readSector past the end of card", sector, g_sdio_sector_count);
+        g_sdio_error = SDIO_ERR_INVALID_PARAM;
+        return false;
+    }
+
     uint8_t *real_dst = dst;
     if (((uint32_t)dst & 3) != 0)
     {
@@ -1295,7 +1305,8 @@ bool SdioCard::readSectors(uint32_t sector, uint8_t* dst, size_t n)
         dst += SDIO_MAX_BLOCKS_PER_REQ * SDIO_BLOCK_SIZE;
     }
 
-    if (n > 1 && ((uint32_t)dst & 3) == 0 && sector + n < g_sdio_sector_count && readStart(sector))
+    if (n > 1 && ((uint32_t)dst & 3) == 0 &&
+        sector < g_sdio_sector_count && n < g_sdio_sector_count - sector && readStart(sector))
     {
         SDIO_DBGMSG("readSectors multi-block", sector, n);
 
