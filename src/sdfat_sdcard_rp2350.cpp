@@ -1185,6 +1185,7 @@ bool SdioCard::writeSectors(uint32_t sector, const uint8_t* src, size_t n)
         // Split large requests
         if (!writeSectors(sector, src, SDIO_MAX_BLOCKS_PER_REQ)) return false;
         n -= SDIO_MAX_BLOCKS_PER_REQ;
+        sector += SDIO_MAX_BLOCKS_PER_REQ;
         src += SDIO_MAX_BLOCKS_PER_REQ * SDIO_BLOCK_SIZE;
     }
 
@@ -1302,6 +1303,7 @@ bool SdioCard::readSectors(uint32_t sector, uint8_t* dst, size_t n)
         // Split large requests
         if (!readSectors(sector, dst, SDIO_MAX_BLOCKS_PER_REQ)) return false;
         n -= SDIO_MAX_BLOCKS_PER_REQ;
+        sector += SDIO_MAX_BLOCKS_PER_REQ;
         dst += SDIO_MAX_BLOCKS_PER_REQ * SDIO_BLOCK_SIZE;
     }
 
