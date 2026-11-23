@@ -624,12 +624,16 @@ static bool prefetchProcess(SdioCard *card)
     else
     {
         // Prefetch error
+        // Capture the status before stopTransmission() overwrites g_sdio_error
+        sdio_status_t err = g_sdio_error;
         SDIO_ERRMSG("Prefetch failed",
             g_sdio_prefetch.sector + g_sdio_prefetch.prefetch_start,
             g_sdio_prefetch.prefetch_count);
         card->stopTransmission(true);
         prefetchClear();
-        sdiocard_error_monitor(card, g_sdio_error);
+        // Count CRC errors even though the sectors can be read again.
+        // Note that this reinitializes the card if there have been too many errors.
+        sdiocard_error_monitor(card, err);
         return false;
     }
 }
@@ -641,7 +645,13 @@ static uint32_t prefetchStart(SdioCard *card, uint32_t sector)
     if (prefetchBusy(card))
     {
         // Previous operation is not yet finished
-        prefetchProcess(card);
+        if (!prefetchProcess(card))
+        {
+            // Prefetch failed and the read command was stopped, so the card
+            // is not going to send any more sectors.
+            return 0;
+        }
+
         if (prefetchBusy(card))
         {
             return sector;
@@ -1238,12 +1248,14 @@ bool SdioCard::readSector(uint32_t sector, uint8_t* dst)
         }
     }
 
-    m_curSector = prefetchStart(this, m_curSector);
-
+    // Copy the data before handling prefetch, because g_sdio_tmp_buf gets overwritten
+    // if the card is reinitialized after prefetch errors.
     if (dst != real_dst)
     {
         memcpy(real_dst, g_sdio_tmp_buf, sizeof(g_sdio_tmp_buf));
     }
+
+    m_curSector = prefetchStart(this, m_curSector);
 
     return true;
 }
