@@ -1305,7 +1305,12 @@ bool SdioCard::readSectors(uint32_t sector, uint8_t* dst, size_t n)
 
         // This is same as readData() except we issue multi-sector transfer
         // to the lower layer.
-        if (checkReturnOk(rp2350_sdio_rx_start(dst, n, SDIO_BLOCK_SIZE)))
+        //
+        // If the prefetch failed above, the read command has been stopped and it must be
+        // issued again for the remaining sectors. Otherwise the card would not send anything
+        // and the reception would fail only after SDIO_TRANSFER_TIMEOUT_US.
+        if ((m_curState == READ_STATE || readStart(sector)) &&
+            checkReturnOk(rp2350_sdio_rx_start(dst, n, SDIO_BLOCK_SIZE)))
         {
             sd_callback_t callback = get_stream_callback(dst, SDIO_BLOCK_SIZE * n, true, sector);
 
