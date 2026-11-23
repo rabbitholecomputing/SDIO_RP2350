@@ -264,6 +264,31 @@ static bool sd_communication_check(SdioCard *card, const uint32_t *expected, uin
     return true;
 }
 
+// End any data transfer that the card may still have open, so that it releases the data lines.
+//
+// Reads are left open for prefetch, so the card can be in middle of sending data when it is
+// reinitialized, or when the MCU has been reset without power cycling the card.
+//
+// The state of DAT3 during CMD0 selects between SD and SPI modes, so the card must not be
+// sending data at that time. Some cards stop sending checksums in responses and data blocks
+// if they receive CMD0 while driving the data lines low. Only a power cycle restores them.
+static void stop_transfer_before_reset()
+{
+    // There is normally no response if there is no transfer in progress.
+    uint32_t reply;
+    rp2350_sdio_command_u32(CMD12, 0, &reply, SDIO_FLAG_NO_LOGMSG);
+
+    uint32_t start = SDIO_TIME_US();
+    while (!gpio_get(SDIO_D0) || !gpio_get(SDIO_D3))
+    {
+        if (SDIO_ELAPSED_US(start) > SDIO_INIT_TIMEOUT_US)
+        {
+            SDIO_ERRMSG("SD card data lines are not idle before reset", gpio_get(SDIO_D0), gpio_get(SDIO_D3));
+            break;
+        }
+    }
+}
+
 bool SdioCard::begin(SdioConfig sdioConfig)
 {
     uint32_t reply;
@@ -282,6 +307,8 @@ bool SdioCard::begin(SdioConfig sdioConfig)
 
     // Wait for initial clock cycles
     SDIO_WAIT_US(1000);
+
+    stop_transfer_before_reset();
 
     // Establish initial connection with the card
     for (int retries = 0; retries < 5; retries++)
