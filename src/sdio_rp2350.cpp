@@ -1262,10 +1262,18 @@ void rp2350_sdio_init(rp2350_sdio_timing_t timing)
         resources_claimed = true;
     }
 
-    dma_channel_abort(SDIO_DMACH_A);
-    dma_channel_abort(SDIO_DMACH_B);
+    // There can be a prefetch in progress if the card is being reinitialized.
+    // Interrupts must be disabled before aborting it, because aborting one of the chained
+    // DMA channels can trigger the other one (RP2350-E5), and the IRQ handler would then
+    // handle the partially received block as if it was complete.
+    uint32_t channel_mask = (1 << SDIO_DMACH_A) | (1 << SDIO_DMACH_B);
+    dma_irqn_set_channel_mask_enabled(SDIO_DMAIRQ_IDX, channel_mask, false);
     pio_sm_set_enabled(SDIO_PIO, SDIO_SM, false);
-    
+    dma_hw->abort = channel_mask;
+    while (dma_hw->abort);
+    dma_hw->abort = channel_mask;
+    while (dma_hw->abort);
+
     // Remove any previously loaded PIO programs
     if (g_sdio.pio_loaded_cmd_prog)
     {
