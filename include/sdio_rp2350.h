@@ -237,6 +237,17 @@ sdio_status_t rp2350_sdio_tx_poll(uint32_t *blocks_complete);
 // Force everything to idle state
 sdio_status_t rp2350_sdio_stop();
 
+// Number of CRC errors since startup. The counts are not cleared when the interface is
+// reinitialized, and they include errors that were corrected by retrying the transfer.
+typedef struct {
+    uint32_t read_errors;     // Received data blocks that had wrong checksum
+    uint32_t write_errors;    // Sent data blocks that the card rejected because of wrong checksum
+    uint32_t response_errors; // Command responses that had wrong checksum
+} rp2350_sdio_crc_errors_t;
+
+// Get the current CRC error counts
+void rp2350_sdio_get_crc_errors(rp2350_sdio_crc_errors_t *errors);
+
 // This should be kept in order by increasing speed
 typedef enum {
     SDIO_INITIALIZE             = 0, // Initialization 300 kHz

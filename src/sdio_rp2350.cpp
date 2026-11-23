@@ -107,6 +107,16 @@ static struct {
     } received_checksums[SDIO_MAX_BLOCKS_PER_REQ + 4];
 } g_sdio;
 
+// CRC error counts, kept separate from g_sdio because it is cleared by rp2350_sdio_init().
+static volatile rp2350_sdio_crc_errors_t g_sdio_crc_errors;
+
+void rp2350_sdio_get_crc_errors(rp2350_sdio_crc_errors_t *errors)
+{
+    errors->read_errors = g_sdio_crc_errors.read_errors;
+    errors->write_errors = g_sdio_crc_errors.write_errors;
+    errors->response_errors = g_sdio_crc_errors.response_errors;
+}
+
 static void rp2350_sdio_dma_irq();
 static uint32_t adjust_clk_add_program(const struct pio_program *program, int extra_delay_0, int extra_delay_1);
 static void compute_prescaler_delay(int divider, int min_divider, int *prescaler, int *delay);
@@ -396,6 +406,7 @@ sdio_status_t rp2350_sdio_command(uint8_t command, uint32_t arg, void *response,
 
             if (crc != expected)
             {
+                g_sdio_crc_errors.response_errors++;
                 SDIO_ERRMSG("SDIO Command response CRC error", dma_buf[0], ((uint32_t)crc << 16) | expected);
                 return SDIO_ERR_RESPONSE_CRC;
             }
@@ -711,6 +722,7 @@ static void sdio_verify_rx_checksums()
 
         if (checksum != expected)
         {
+            g_sdio_crc_errors.read_errors++;
             g_sdio.checksum_errors++;
             if (g_sdio.checksum_errors == 1)
             {
@@ -970,6 +982,7 @@ sdio_status_t check_sdio_write_response(uint32_t card_response)
     }
     else if (wr_status == 5)
     {
+        g_sdio_crc_errors.write_errors++;
         SDIO_ERRMSG("SDIO data write CRC error", card_response, g_sdio.blocks_done);
         return SDIO_ERR_WRITE_CRC;    
     }
