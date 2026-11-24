@@ -458,7 +458,14 @@ bool SdioCard::begin(SdioConfig sdioConfig)
         // Check SD card class and do not attempt high-speed for old cards
         // SD card standard requires high speed mode only for class >= 10
         sds_t sds = {0};
-        if (readSDS(&sds) && sds.speedClass() < 10)
+        bool have_sds = readSDS(&sds) || readSDS(&sds); // Retry once
+
+        if (!have_sds)
+        {
+            SDIO_CRITMSG("Failed to read SD card speed class, using standard speed", g_sdio_error, 0);
+            mode = SDIO_STANDARD;
+        }
+        else if (sds.speedClass() < 10)
         {
             SDIO_DBGMSG("Using standard speed for card class < 10", sds.speedClass(), 0);
             mode = SDIO_STANDARD;
@@ -593,6 +600,12 @@ bool SdioCard::readSDS(sds_t* sds)
     } while (g_sdio_error == SDIO_BUSY);
 
     rp2350_sdio_stop();
+
+    if (g_sdio_error != SDIO_OK)
+    {
+        SDIO_ERRMSG("readSDS failed", g_sdio_error, 0);
+        return false;
+    }
 
     memcpy(sds, g_sdio_tmp_buf, sizeof(*sds));
     return true;
@@ -1150,6 +1163,12 @@ bool SdioCard::readSCR(scr_t* scr)
     } while (g_sdio_error == SDIO_BUSY);
 
     rp2350_sdio_stop();
+
+    if (g_sdio_error != SDIO_OK)
+    {
+        SDIO_ERRMSG("readSCR failed", g_sdio_error, 0);
+        return false;
+    }
 
     memcpy(scr, g_sdio_tmp_buf, sizeof(*scr));
     return true;
