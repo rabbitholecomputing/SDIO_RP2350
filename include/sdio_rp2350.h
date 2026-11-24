@@ -166,12 +166,12 @@ typedef enum {
 #define SDIO_DEFAULT_SPEED SDIO_HIGHSPEED
 #endif
 
-// Number of CRC errors before automatic fallback to slower clockspeed
+// Number of CRC errors before automatically reducing the speed to the next slower mode
 #ifndef SDIO_FALLBACK_CRC_ERROR_COUNT
 #define SDIO_FALLBACK_CRC_ERROR_COUNT 3
 #endif
 
-// Mode to fall back to after multiple CRC errors
+// Slowest mode that the speed is reduced to after multiple CRC errors
 #ifndef SDIO_FALLBACK_MODE
 #define SDIO_FALLBACK_MODE SDIO_STANDARD
 #endif
@@ -187,6 +187,14 @@ typedef enum {
 // rate even when data transfer is faster.
 #ifndef SDIO_MAX_CMD_CLOCK_RATE_HZ
 #define SDIO_MAX_CMD_CLOCK_RATE_HZ 25000000
+#endif
+
+// Clock rate used after the card has been selected, until the final speed is set.
+// This should be slow enough to work whether the card is in standard or high-speed mode.
+// It must be much faster than the identification clock rate: some cards start sending data
+// soon after the command, and if the response has not ended by then, start of the data is missed.
+#ifndef SDIO_SETUP_CLOCK_HZ
+#define SDIO_SETUP_CLOCK_HZ 12500000
 #endif
 
 #ifndef SDIO_CARD_OCR_MODE
@@ -237,6 +245,17 @@ sdio_status_t rp2350_sdio_tx_poll(uint32_t *blocks_complete);
 // Force everything to idle state
 sdio_status_t rp2350_sdio_stop();
 
+// Number of CRC errors since startup. The counts are not cleared when the interface is
+// reinitialized, and they include errors that were corrected by retrying the transfer.
+typedef struct {
+    uint32_t read_errors;     // Received data blocks that had wrong checksum
+    uint32_t write_errors;    // Sent data blocks that the card rejected because of wrong checksum
+    uint32_t response_errors; // Command responses that had wrong checksum
+} rp2350_sdio_crc_errors_t;
+
+// Get the current CRC error counts
+void rp2350_sdio_get_crc_errors(rp2350_sdio_crc_errors_t *errors);
+
 // This should be kept in order by increasing speed
 typedef enum {
     SDIO_INITIALIZE             = 0, // Initialization 300 kHz
@@ -260,6 +279,15 @@ rp2350_sdio_timing_t rp2350_sdio_get_timing(rp2350_sdio_mode_t mode);
 // Note that for high speed modes you need to issue CMD6 to card to
 // switch its mode.
 void rp2350_sdio_init(rp2350_sdio_timing_t timing);
+
+// Optional callback that sets the maximum speed used when the SD card is initialized.
+// When set, card initialization tries the returned mode instead of SDIO_DEFAULT_SPEED.
+// The speed is still lowered automatically for old cards, after CRC errors or if
+// communication fails at the returned speed.
+// Set to NULL to restore the default speed selection.
+typedef rp2350_sdio_mode_t (*sd_max_speed_callback_t)(void);
+void rp2350_sdio_set_max_speed_callback(sd_max_speed_callback_t func);
+sd_max_speed_callback_t rp2350_sdio_get_max_speed_callback(void);
 
 #ifdef SDIO_USE_SDFAT
 // Optional callback can be used to do co-operative multitasking while SdFat is reading data.

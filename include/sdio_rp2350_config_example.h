@@ -43,6 +43,7 @@
 // Number of CRC errors before automatic fallback to slower clockspeed
 // #define SDIO_FALLBACK_CRC_ERROR_COUNT 3
 // #define SDIO_FALLBACK_MODE SDIO_STANDARD
+// #define SDIO_SETUP_CLOCK_HZ 12500000
 
 // PIO block to use
 #define SDIO_PIO pio1

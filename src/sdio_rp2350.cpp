@@ -107,6 +107,16 @@ static struct {
     } received_checksums[SDIO_MAX_BLOCKS_PER_REQ + 4];
 } g_sdio;
 
+// CRC error counts, kept separate from g_sdio because it is cleared by rp2350_sdio_init().
+static volatile rp2350_sdio_crc_errors_t g_sdio_crc_errors;
+
+void rp2350_sdio_get_crc_errors(rp2350_sdio_crc_errors_t *errors)
+{
+    errors->read_errors = g_sdio_crc_errors.read_errors;
+    errors->write_errors = g_sdio_crc_errors.write_errors;
+    errors->response_errors = g_sdio_crc_errors.response_errors;
+}
+
 static void rp2350_sdio_dma_irq();
 static uint32_t adjust_clk_add_program(const struct pio_program *program, int extra_delay_0, int extra_delay_1);
 static void compute_prescaler_delay(int divider, int min_divider, int *prescaler, int *delay);
@@ -396,6 +406,7 @@ sdio_status_t rp2350_sdio_command(uint8_t command, uint32_t arg, void *response,
 
             if (crc != expected)
             {
+                g_sdio_crc_errors.response_errors++;
                 SDIO_ERRMSG("SDIO Command response CRC error", dma_buf[0], ((uint32_t)crc << 16) | expected);
                 return SDIO_ERR_RESPONSE_CRC;
             }
@@ -541,16 +552,17 @@ sdio_status_t rp2350_sdio_rx_start(uint8_t *buffer, uint32_t num_blocks, uint32_
         pio_sm_set_consecutive_pindirs(SDIO_PIO, SDIO_SM, SDIO_D0, 4, false);
 
         // Write number of nibbles to receive to Y register
-        // 2 per byte, plus 16 for checksum, plus 8 for trailing clocks
-        // minus one because how PIO counter works
-        int nibbles = blocksize * 2 + 16 + 8 - 1;
-
-        // In high speed mode, one extra clock edge is issued after capturing the last nibble,
-        // so subtract one. In overclock mode, two extra edges.
-        if (g_sdio.pio_loaded_data_prog == &sdio_data_rx_hs_program)
-            nibbles -= 1;
-        else if (g_sdio.pio_loaded_data_prog == &sdio_data_rx_hs_oc_program)
-            nibbles -= 2;
+        // 2 per byte, plus 16 for checksum, minus one because how PIO counter works.
+        //
+        // Do not capture any nibbles after the checksum. The gap between blocks of a
+        // multi-block read depends on the card, and can be just a few clock cycles if
+        // the card already has the next block ready. If the start bit of the next block
+        // is captured as a trailing nibble of the previous one, the PIO program begins
+        // reception too late and the whole block is shifted.
+        //
+        // The 8 clocks needed after the last block of a transaction are provided by
+        // sdio_cmd program when the transfer is stopped.
+        int nibbles = blocksize * 2 + 16 - 1;
 
         pio_sm_put(SDIO_PIO, SDIO_SM, nibbles);
         pio_sm_exec(SDIO_PIO, SDIO_SM, pio_encode_out(pio_y, 32) | pio_encode_sideset(1, 1));
@@ -604,7 +616,7 @@ sdio_status_t rp2350_sdio_rx_start(uint8_t *buffer, uint32_t num_blocks, uint32_
             if (i < num_blocks - 1)
             {
                 // Copy the checksum from the FIFO
-                // There is one extra word for the trailing clocks, this dummy value can go over the next checksum.
+                // There is one extra word marking the end of block, this dummy value can go over the next checksum.
                 // This starts up the next reception
                 g_sdio.dma_blocks[i * 2 + 1].write_addr = &g_sdio.received_checksums[i];
                 g_sdio.dma_blocks[i * 2 + 1].transfer_count = 3;
@@ -710,6 +722,7 @@ static void sdio_verify_rx_checksums()
 
         if (checksum != expected)
         {
+            g_sdio_crc_errors.read_errors++;
             g_sdio.checksum_errors++;
             if (g_sdio.checksum_errors == 1)
             {
@@ -969,6 +982,7 @@ sdio_status_t check_sdio_write_response(uint32_t card_response)
     }
     else if (wr_status == 5)
     {
+        g_sdio_crc_errors.write_errors++;
         SDIO_ERRMSG("SDIO data write CRC error", card_response, g_sdio.blocks_done);
         return SDIO_ERR_WRITE_CRC;    
     }
@@ -1231,6 +1245,18 @@ rp2350_sdio_timing_t rp2350_sdio_get_timing(rp2350_sdio_mode_t mode)
     return result;
 }
 
+static sd_max_speed_callback_t g_sdio_max_speed_callback = NULL;
+
+void rp2350_sdio_set_max_speed_callback(sd_max_speed_callback_t func)
+{
+    g_sdio_max_speed_callback = func;
+}
+
+sd_max_speed_callback_t rp2350_sdio_get_max_speed_callback(void)
+{
+    return g_sdio_max_speed_callback;
+}
+
 void rp2350_sdio_init(rp2350_sdio_timing_t timing)
 {
     SDIO_DBGMSG("SDIO init", timing.cmd_clk_divider, timing.data_clk_divider);
@@ -1249,10 +1275,18 @@ void rp2350_sdio_init(rp2350_sdio_timing_t timing)
         resources_claimed = true;
     }
 
-    dma_channel_abort(SDIO_DMACH_A);
-    dma_channel_abort(SDIO_DMACH_B);
+    // There can be a prefetch in progress if the card is being reinitialized.
+    // Interrupts must be disabled before aborting it, because aborting one of the chained
+    // DMA channels can trigger the other one (RP2350-E5), and the IRQ handler would then
+    // handle the partially received block as if it was complete.
+    uint32_t channel_mask = (1 << SDIO_DMACH_A) | (1 << SDIO_DMACH_B);
+    dma_irqn_set_channel_mask_enabled(SDIO_DMAIRQ_IDX, channel_mask, false);
     pio_sm_set_enabled(SDIO_PIO, SDIO_SM, false);
-    
+    dma_hw->abort = channel_mask;
+    while (dma_hw->abort);
+    dma_hw->abort = channel_mask;
+    while (dma_hw->abort);
+
     // Remove any previously loaded PIO programs
     if (g_sdio.pio_loaded_cmd_prog)
     {

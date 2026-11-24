@@ -121,8 +121,24 @@ static void sdiocard_error_monitor(SdioCard *card, sdio_status_t error)
         if (g_sdio_crc_failure_count > SDIO_FALLBACK_CRC_ERROR_COUNT &&
             (int)g_sdio_active_clk_mode > SDIO_FALLBACK_MODE)
         {
-            SDIO_CRITMSG("Multiple SDIO CRC errors, reducing clock to 25 MHz", g_sdio_crc_failure_count, g_sdio_active_clk_mode);
-            g_sdio_max_clk_mode = SDIO_FALLBACK_MODE;
+            // Reduce the speed by one mode at a time. Initialization clears the error count, so
+            // the speed is reduced further only if there are more errors at the new speed.
+            rp2350_sdio_mode_t mode = (rp2350_sdio_mode_t)((int)g_sdio_active_clk_mode - 1);
+
+            if (mode == SDIO_HIGHSPEED)
+            {
+                SDIO_CRITMSG("Multiple SDIO CRC errors, reducing clock to 50 MHz", g_sdio_crc_failure_count, g_sdio_active_clk_mode);
+            }
+            else if (mode == SDIO_STANDARD)
+            {
+                SDIO_CRITMSG("Multiple SDIO CRC errors, reducing clock to 25 MHz", g_sdio_crc_failure_count, g_sdio_active_clk_mode);
+            }
+            else
+            {
+                SDIO_CRITMSG("Multiple SDIO CRC errors, reducing clock to 20 MHz", g_sdio_crc_failure_count, g_sdio_active_clk_mode);
+            }
+
+            g_sdio_max_clk_mode = mode;
 
             SdioConfig defcfg;
             card->begin(defcfg);
@@ -264,6 +280,45 @@ static bool sd_communication_check(SdioCard *card, const uint32_t *expected, uin
     return true;
 }
 
+// Timing used after the card has been selected, until the final speed is set.
+static rp2350_sdio_timing_t get_setup_timing()
+{
+    rp2350_sdio_timing_t timing = rp2350_sdio_get_timing(SDIO_INITIALIZE);
+
+    int divider = (clock_get_hz(clk_sys) + SDIO_SETUP_CLOCK_HZ - 1) / SDIO_SETUP_CLOCK_HZ;
+    if (divider < SDIO_MIN_CMD_CLK_DIVIDER) divider = SDIO_MIN_CMD_CLK_DIVIDER;
+    if (divider < SDIO_MIN_DATA_CLK_DIVIDER) divider = SDIO_MIN_DATA_CLK_DIVIDER;
+
+    timing.cmd_clk_divider = divider;
+    timing.data_clk_divider = divider;
+    return timing;
+}
+
+// End any data transfer that the card may still have open, so that it releases the data lines.
+//
+// Reads are left open for prefetch, so the card can be in middle of sending data when it is
+// reinitialized, or when the MCU has been reset without power cycling the card.
+//
+// The state of DAT3 during CMD0 selects between SD and SPI modes, so the card must not be
+// sending data at that time. Some cards stop sending checksums in responses and data blocks
+// if they receive CMD0 while driving the data lines low. Only a power cycle restores them.
+static void stop_transfer_before_reset()
+{
+    // There is normally no response if there is no transfer in progress.
+    uint32_t reply;
+    rp2350_sdio_command_u32(CMD12, 0, &reply, SDIO_FLAG_NO_LOGMSG);
+
+    uint32_t start = SDIO_TIME_US();
+    while (!gpio_get(SDIO_D0) || !gpio_get(SDIO_D3))
+    {
+        if (SDIO_ELAPSED_US(start) > SDIO_INIT_TIMEOUT_US)
+        {
+            SDIO_ERRMSG("SD card data lines are not idle before reset", gpio_get(SDIO_D0), gpio_get(SDIO_D3));
+            break;
+        }
+    }
+}
+
 bool SdioCard::begin(SdioConfig sdioConfig)
 {
     uint32_t reply;
@@ -282,6 +337,8 @@ bool SdioCard::begin(SdioConfig sdioConfig)
 
     // Wait for initial clock cycles
     SDIO_WAIT_US(1000);
+
+    stop_transfer_before_reset();
 
     // Establish initial connection with the card
     for (int retries = 0; retries < 5; retries++)
@@ -359,23 +416,56 @@ bool SdioCard::begin(SdioConfig sdioConfig)
         return false;
     }
 
-    // Check that data bus works at this slow speed.
+    // The slow clock rate is needed only for identification.
+    rp2350_sdio_timing_t setup_timing = get_setup_timing();
+    rp2350_sdio_init(setup_timing);
+
+    // Check that data bus works at this moderate speed.
     uint32_t checksum;
     if (!sd_communication_check(this, NULL, &checksum))
     {
-        SDIO_ERRMSG("SDIO data bus is not working", 0, 0);
-        return false;
+        SDIO_ERRMSG("Communication check failed, trying at initialization speed", g_sdio_error, 0);
+        setup_timing = rp2350_sdio_get_timing(SDIO_INITIALIZE);
+        rp2350_sdio_init(setup_timing);
+
+        if (!sd_communication_check(this, NULL, &checksum))
+        {
+            SDIO_ERRMSG("SDIO data bus is not working", 0, 0);
+            return false;
+        }
     }
-    
+
     rp2350_sdio_mode_t mode = SDIO_DEFAULT_SPEED;
     rp2350_sdio_timing_t timing;
+
+    sd_max_speed_callback_t max_speed_callback = rp2350_sdio_get_max_speed_callback();
+    if (max_speed_callback != NULL)
+    {
+        rp2350_sdio_mode_t requested = max_speed_callback();
+        if ((int)requested >= SDIO_MMC && (int)requested <= SDIO_HIGHSPEED_OVERCLOCK)
+        {
+            SDIO_DBGMSG("SDIO max speed set by callback", (int)requested, 0);
+            mode = requested;
+        }
+        else
+        {
+            SDIO_ERRMSG("Invalid SDIO mode from max speed callback, using default", (int)requested, (int)SDIO_DEFAULT_SPEED);
+        }
+    }
 
     if ((int)mode >= SDIO_HIGHSPEED)
     {
         // Check SD card class and do not attempt high-speed for old cards
         // SD card standard requires high speed mode only for class >= 10
         sds_t sds = {0};
-        if (readSDS(&sds) && sds.speedClass() < 10)
+        bool have_sds = readSDS(&sds) || readSDS(&sds); // Retry once
+
+        if (!have_sds)
+        {
+            SDIO_CRITMSG("Failed to read SD card speed class, using standard speed", g_sdio_error, 0);
+            mode = SDIO_STANDARD;
+        }
+        else if (sds.speedClass() < 10)
         {
             SDIO_DBGMSG("Using standard speed for card class < 10", sds.speedClass(), 0);
             mode = SDIO_STANDARD;
@@ -423,7 +513,7 @@ bool SdioCard::begin(SdioConfig sdioConfig)
             SDIO_ERRMSG("SDIO communication check failed, reducing speed", (int)mode, 0);
 
             // Return to slow rate for running CMD6
-            rp2350_sdio_init(rp2350_sdio_get_timing(SDIO_INITIALIZE));
+            rp2350_sdio_init(setup_timing);
         }
         else
         {
@@ -511,6 +601,12 @@ bool SdioCard::readSDS(sds_t* sds)
 
     rp2350_sdio_stop();
 
+    if (g_sdio_error != SDIO_OK)
+    {
+        SDIO_ERRMSG("readSDS failed", g_sdio_error, 0);
+        return false;
+    }
+
     memcpy(sds, g_sdio_tmp_buf, sizeof(*sds));
     return true;
 }
@@ -582,12 +678,16 @@ static bool prefetchProcess(SdioCard *card)
     else
     {
         // Prefetch error
+        // Capture the status before stopTransmission() overwrites g_sdio_error
+        sdio_status_t err = g_sdio_error;
         SDIO_ERRMSG("Prefetch failed",
             g_sdio_prefetch.sector + g_sdio_prefetch.prefetch_start,
             g_sdio_prefetch.prefetch_count);
         card->stopTransmission(true);
         prefetchClear();
-        sdiocard_error_monitor(card, g_sdio_error);
+        // Count CRC errors even though the sectors can be read again.
+        // Note that this reinitializes the card if there have been too many errors.
+        sdiocard_error_monitor(card, err);
         return false;
     }
 }
@@ -599,7 +699,13 @@ static uint32_t prefetchStart(SdioCard *card, uint32_t sector)
     if (prefetchBusy(card))
     {
         // Previous operation is not yet finished
-        prefetchProcess(card);
+        if (!prefetchProcess(card))
+        {
+            // Prefetch failed and the read command was stopped, so the card
+            // is not going to send any more sectors.
+            return 0;
+        }
+
         if (prefetchBusy(card))
         {
             return sector;
@@ -1058,6 +1164,12 @@ bool SdioCard::readSCR(scr_t* scr)
 
     rp2350_sdio_stop();
 
+    if (g_sdio_error != SDIO_OK)
+    {
+        SDIO_ERRMSG("readSCR failed", g_sdio_error, 0);
+        return false;
+    }
+
     memcpy(scr, g_sdio_tmp_buf, sizeof(*scr));
     return true;
 }
@@ -1066,6 +1178,7 @@ bool SdioCard::readSCR(scr_t* scr)
 
 bool SdioCard::writeSector(uint32_t sector, const uint8_t* src)
 {
+    const uint8_t *real_src = src;
     if (((uint32_t)src & 3) != 0)
     {
         // Buffer is not aligned, need to memcpy() the data to a temporary buffer.
@@ -1084,6 +1197,14 @@ bool SdioCard::writeSector(uint32_t sector, const uint8_t* src)
         for (int i = 0; i < SDIO_MAX_RETRYCOUNT; i++)
         {
             SDIO_DBGMSG("Retrying write_single_sector", sector, i);
+
+            if (src != real_src)
+            {
+                // Copy the data again, because g_sdio_tmp_buf gets overwritten
+                // if the card is reinitialized after CRC errors.
+                memcpy(g_sdio_tmp_buf, real_src, sizeof(g_sdio_tmp_buf));
+            }
+
             if (write_single_sector(this, sector, src))
             {
                 success = true;
@@ -1108,6 +1229,7 @@ bool SdioCard::writeSectors(uint32_t sector, const uint8_t* src, size_t n)
         // Split large requests
         if (!writeSectors(sector, src, SDIO_MAX_BLOCKS_PER_REQ)) return false;
         n -= SDIO_MAX_BLOCKS_PER_REQ;
+        sector += SDIO_MAX_BLOCKS_PER_REQ;
         src += SDIO_MAX_BLOCKS_PER_REQ * SDIO_BLOCK_SIZE;
     }
 
@@ -1164,6 +1286,16 @@ bool SdioCard::writeSectors(uint32_t sector, const uint8_t* src, size_t n)
 
 bool SdioCard::readSector(uint32_t sector, uint8_t* dst)
 {
+    if (sector >= g_sdio_sector_count)
+    {
+        // The card does not send any data for these, so the read and its retry would
+        // fail only after SDIO_TRANSFER_TIMEOUT_US. This happens for example when SdFat
+        // looks for a partition table on a card that does not have one.
+        SDIO_ERRMSG("readSector past the end of card", sector, g_sdio_sector_count);
+        g_sdio_error = SDIO_ERR_INVALID_PARAM;
+        return false;
+    }
+
     uint8_t *real_dst = dst;
     if (((uint32_t)dst & 3) != 0)
     {
@@ -1196,12 +1328,14 @@ bool SdioCard::readSector(uint32_t sector, uint8_t* dst)
         }
     }
 
-    m_curSector = prefetchStart(this, m_curSector);
-
+    // Copy the data before handling prefetch, because g_sdio_tmp_buf gets overwritten
+    // if the card is reinitialized after prefetch errors.
     if (dst != real_dst)
     {
         memcpy(real_dst, g_sdio_tmp_buf, sizeof(g_sdio_tmp_buf));
     }
+
+    m_curSector = prefetchStart(this, m_curSector);
 
     return true;
 }
@@ -1213,10 +1347,12 @@ bool SdioCard::readSectors(uint32_t sector, uint8_t* dst, size_t n)
         // Split large requests
         if (!readSectors(sector, dst, SDIO_MAX_BLOCKS_PER_REQ)) return false;
         n -= SDIO_MAX_BLOCKS_PER_REQ;
+        sector += SDIO_MAX_BLOCKS_PER_REQ;
         dst += SDIO_MAX_BLOCKS_PER_REQ * SDIO_BLOCK_SIZE;
     }
 
-    if (n > 1 && ((uint32_t)dst & 3) == 0 && sector + n < g_sdio_sector_count && readStart(sector))
+    if (n > 1 && ((uint32_t)dst & 3) == 0 &&
+        sector < g_sdio_sector_count && n < g_sdio_sector_count - sector && readStart(sector))
     {
         SDIO_DBGMSG("readSectors multi-block", sector, n);
 
@@ -1251,7 +1387,12 @@ bool SdioCard::readSectors(uint32_t sector, uint8_t* dst, size_t n)
 
         // This is same as readData() except we issue multi-sector transfer
         // to the lower layer.
-        if (checkReturnOk(rp2350_sdio_rx_start(dst, n, SDIO_BLOCK_SIZE)))
+        //
+        // If the prefetch failed above, the read command has been stopped and it must be
+        // issued again for the remaining sectors. Otherwise the card would not send anything
+        // and the reception would fail only after SDIO_TRANSFER_TIMEOUT_US.
+        if ((m_curState == READ_STATE || readStart(sector)) &&
+            checkReturnOk(rp2350_sdio_rx_start(dst, n, SDIO_BLOCK_SIZE)))
         {
             sd_callback_t callback = get_stream_callback(dst, SDIO_BLOCK_SIZE * n, true, sector);
 
@@ -1273,8 +1414,12 @@ bool SdioCard::readSectors(uint32_t sector, uint8_t* dst, size_t n)
             }
             else
             {
-                SDIO_ERRMSG("readSectors multi-block failed", sector, g_sdio_error);
+                // Capture the status before stopTransmission() overwrites g_sdio_error
+                sdio_status_t err = g_sdio_error;
+                SDIO_ERRMSG("readSectors multi-block failed", sector, err);
                 stopTransmission(true);
+                // Count CRC errors even if the sector-by-sector retry below succeeds
+                sdiocard_error_monitor(this, err);
                 // Fall through to retry sector-by-sector
             }
         }

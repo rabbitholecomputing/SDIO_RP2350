@@ -233,6 +233,9 @@ rx_data:
     in PINS, 4              side 0  [CMD_DELAY]  ; Read input nibble, give falling edge
     jmp X--, rx_data        side 1  [CMD_DELAY]  ; Loop while reception continues
 
+rx_done:
+    push                    side 1  [0]          ; Push empty word to mark end of block
+
 wait_next:
     mov X, STATUS           side 1  [0]          ; Check if DMA has read out the whole block
     jmp !X, wait_next       side 1  [0]          ; Keep clock stopped until next block should start
@@ -260,7 +263,7 @@ rx_data:
     jmp X--, rx_data        side 1  [1]  ; Loop while reception continues
 
 rx_done:
-    push                    side 1  [0]  ; Push partial last word
+    push                    side 1  [0]  ; Push empty word to mark end of block
 
 wait_next:
     mov X, STATUS           side 1  [0]          ; Check if DMA has read out the whole block
@@ -286,7 +289,7 @@ rx_data:
     jmp X--, rx_data        side 0  [0]  ; Loop while reception continues
 
 rx_done:
-    push                    side 1  [0]  ; Push partial last word
+    push                    side 1  [0]  ; Push empty word to mark end of block
 
 wait_next:
     mov X, STATUS           side 1  [0]          ; Check if DMA has read out the whole block
