@@ -280,6 +280,20 @@ static bool sd_communication_check(SdioCard *card, const uint32_t *expected, uin
     return true;
 }
 
+// Timing used after the card has been selected, until the final speed is set.
+static rp2350_sdio_timing_t get_setup_timing()
+{
+    rp2350_sdio_timing_t timing = rp2350_sdio_get_timing(SDIO_INITIALIZE);
+
+    int divider = (clock_get_hz(clk_sys) + SDIO_SETUP_CLOCK_HZ - 1) / SDIO_SETUP_CLOCK_HZ;
+    if (divider < SDIO_MIN_CMD_CLK_DIVIDER) divider = SDIO_MIN_CMD_CLK_DIVIDER;
+    if (divider < SDIO_MIN_DATA_CLK_DIVIDER) divider = SDIO_MIN_DATA_CLK_DIVIDER;
+
+    timing.cmd_clk_divider = divider;
+    timing.data_clk_divider = divider;
+    return timing;
+}
+
 // End any data transfer that the card may still have open, so that it releases the data lines.
 //
 // Reads are left open for prefetch, so the card can be in middle of sending data when it is
@@ -402,14 +416,25 @@ bool SdioCard::begin(SdioConfig sdioConfig)
         return false;
     }
 
-    // Check that data bus works at this slow speed.
+    // The slow clock rate is needed only for identification.
+    rp2350_sdio_timing_t setup_timing = get_setup_timing();
+    rp2350_sdio_init(setup_timing);
+
+    // Check that data bus works at this moderate speed.
     uint32_t checksum;
     if (!sd_communication_check(this, NULL, &checksum))
     {
-        SDIO_ERRMSG("SDIO data bus is not working", 0, 0);
-        return false;
+        SDIO_ERRMSG("Communication check failed, trying at initialization speed", g_sdio_error, 0);
+        setup_timing = rp2350_sdio_get_timing(SDIO_INITIALIZE);
+        rp2350_sdio_init(setup_timing);
+
+        if (!sd_communication_check(this, NULL, &checksum))
+        {
+            SDIO_ERRMSG("SDIO data bus is not working", 0, 0);
+            return false;
+        }
     }
-    
+
     rp2350_sdio_mode_t mode = SDIO_DEFAULT_SPEED;
     rp2350_sdio_timing_t timing;
 
@@ -481,7 +506,7 @@ bool SdioCard::begin(SdioConfig sdioConfig)
             SDIO_ERRMSG("SDIO communication check failed, reducing speed", (int)mode, 0);
 
             // Return to slow rate for running CMD6
-            rp2350_sdio_init(rp2350_sdio_get_timing(SDIO_INITIALIZE));
+            rp2350_sdio_init(setup_timing);
         }
         else
         {

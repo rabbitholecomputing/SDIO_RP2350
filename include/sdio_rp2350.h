@@ -189,6 +189,14 @@ typedef enum {
 #define SDIO_MAX_CMD_CLOCK_RATE_HZ 25000000
 #endif
 
+// Clock rate used after the card has been selected, until the final speed is set.
+// This should be slow enough to work whether the card is in standard or high-speed mode.
+// It must be much faster than the identification clock rate: some cards start sending data
+// soon after the command, and if the response has not ended by then, start of the data is missed.
+#ifndef SDIO_SETUP_CLOCK_HZ
+#define SDIO_SETUP_CLOCK_HZ 12500000
+#endif
+
 #ifndef SDIO_CARD_OCR_MODE
 // See 4.2.3.1 Initialization Command (ACMD41) in SD specification
 // Default value sets high capacity, maximum performance, 3.3V supply voltage
